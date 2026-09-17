@@ -53,7 +53,7 @@ shared_module(meson.project_name(), src + [version_header],
 )
 
 search_tests = executable('scrolloverview-search-tests',
-  ['Search.cpp', 'tests/SearchTests.cc'],
+  ['Search.cpp', 'SearchLayout.cpp', 'tests/SearchTests.cc'],
   include_directories: include_directories('.'),
   dependencies: [dependency('glib-2.0')],
 )

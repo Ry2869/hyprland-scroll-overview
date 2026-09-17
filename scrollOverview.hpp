@@ -12,6 +12,7 @@
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/render/types.hpp>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -59,6 +60,7 @@ class CScrollOverview : public IOverview {
     bool         moveSelection(const std::string& direction) override;
     bool         windowDispatcherAction(const std::string& action) override;
     void         onSearchChanged() override;
+    void         onSearchConfigChanged() override;
     size_t       searchResultCount() const override;
 
     void         fullRender() override;
@@ -96,6 +98,12 @@ class CScrollOverview : public IOverview {
     bool       windowMatchesSearch(const PHLWINDOW& window) const;
     bool       shouldRenderOverviewWindow(const PHLWINDOW& window) const;
     bool       shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) const;
+    void       rebuildSearchLayout();
+    std::optional<CBox> searchLayoutGlobalBox(const PHLWINDOW& window) const;
+    CBox       overviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
+                                  bool round = true) const;
+    CBox       overviewDragWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
+                                      bool round = true) const;
     void       reconcileSearchSelection();
     bool       moveSearchSelection(const std::string& direction);
     void       renderSearchBar(PHLMONITOR monitor);
@@ -331,9 +339,13 @@ class CScrollOverview : public IOverview {
     std::string                      searchRepeatText;
     std::unordered_set<uint32_t>     consumedSearchKeys;
     std::string                      normalizedSearchQuery;
-    std::string                      searchTextCacheLabel;
+    std::unordered_map<Desktop::View::CWindow*, CBox> searchLayoutBoxes;
+    std::string                      searchQueryCacheLabel;
+    std::string                      searchCountCacheLabel;
     float                            searchTextCacheScale = 0.F;
-    SP<Render::ITexture>             searchTextTexture;
+    int                              searchTextCacheWidth = 0;
+    SP<Render::ITexture>             searchQueryTexture;
+    SP<Render::ITexture>             searchCountTexture;
 
     bool                             closing = false;
     bool                             closeApplied = false; // close() has run its teardown; guards against double-invocation

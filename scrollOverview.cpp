@@ -68,6 +68,7 @@
 #include "OverviewPassElement.hpp"
 #include "OverviewRender.hpp"
 #include "Search.hpp"
+#include "SearchLayout.hpp"
 #include "Window.hpp"
 
 static PHLWINDOW getOverviewFullscreenVisibilityWindow(const PHLWORKSPACE& workspace, const PHLWINDOW& fallback = {});
@@ -983,7 +984,8 @@ CScrollOverview::~CScrollOverview() {
         wl_event_source_remove(searchRepeatTimer);
         searchRepeatTimer = nullptr;
     }
-    searchTextTexture.reset();
+    searchQueryTexture.reset();
+    searchCountTexture.reset();
     if (backdropBlurFB)
         backdropBlurFB->release();
     backdropBlurFB.reset();
@@ -1412,7 +1414,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
 
                 const auto WORKSPACEOFFSET =
                     workspaceOverviewOffset(resizeWorkspace, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-                const auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+                const auto WINDOWBOX = overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET);
 
                 resizePointerDown    = true;
                 resizeStartMouseLocal = lastMousePosLocal;
@@ -1782,8 +1784,10 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     viewportCurrentWorkspace = activeWorkspaceIndex();
     syncSelectionToViewport();
     normalizedSearchQuery = ScrollOverview::Search::normalize(overviewSearchQuery());
-    if (overviewSearchActive())
+    if (overviewSearchActive()) {
+        rebuildSearchLayout();
         reconcileSearchSelection();
+    }
 }
 
 static void renderOverviewLayerLevel(PHLMONITOR monitor, uint32_t layer, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F) {
@@ -1930,55 +1934,105 @@ void CScrollOverview::renderBackdropBlurCache(PHLMONITOR monitor) {
 }
 
 void CScrollOverview::renderSearchBar(PHLMONITOR monitor) {
-    if (!monitor || !ScrollOverview::Config::getSearchEnabled() || !overviewSearchActive())
+    if (!monitor || !ScrollOverview::Config::getSearchEnabled())
         return;
 
-    const auto  RESULTS      = searchResultCount();
-    const auto& QUERY        = overviewSearchQuery();
-    const auto  LABEL        = std::string{"Search: "} + QUERY + "  —  " + std::to_string(RESULTS) + (RESULTS == 1 ? " result" : " results");
-    const float SCALE        = std::max<float>(monitor->m_scale, 0.01F);
-    const float VIEWWIDTH    = sc<float>(monitor->m_transformedSize.x);
-    const int   MAXTEXTWIDTH = std::max(1, sc<int>(std::round(VIEWWIDTH * 0.65F)));
+    const auto  RESULTS       = searchResultCount();
+    const auto& QUERY         = overviewSearchQuery();
+    const bool  HASQUERY      = overviewSearchActive();
+    const auto  QUERYLABEL    = HASQUERY ? QUERY : std::string{"Type to search windows…"};
+    const auto  COUNTLABEL    = std::to_string(RESULTS) + (HASQUERY ? (RESULTS == 1 ? " result" : " results") : (RESULTS == 1 ? " window" : " windows"));
+    const auto  QUERYCACHEKEY = std::string{HASQUERY ? "query:" : "placeholder:"} + QUERYLABEL;
+    const float SCALE         = std::max<float>(monitor->m_scale, 0.01F);
+    const float VIEWWIDTH     = sc<float>(monitor->m_transformedSize.x);
+    const float WIDTHRATIO    = std::clamp(ScrollOverview::Config::getValue<float>("plugin:scrolloverview:search:width_ratio"), 0.1F, 1.F);
+    const float MAXWIDTH      = std::max(120, ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:max_width")) * SCALE;
+    const float CARDWIDTH     = std::max(1.F, std::min(VIEWWIDTH * WIDTHRATIO, MAXWIDTH));
+    const float PADDINGX      = std::max(0, ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:padding_x")) * SCALE;
+    const float PADDINGY      = std::max(0, ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:padding_y")) * SCALE;
+    const float TEXTGAP       = 16.F * SCALE;
+    const int   FONTSIZE      = std::max(1, sc<int>(std::round(std::max(1, ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:font_size")) * SCALE)));
+    const int   CONTENTWIDTH  = std::max(1, sc<int>(std::round(CARDWIDTH - PADDINGX * 2.F)));
+    const auto  FONT          = ScrollOverview::Config::getValue<std::string>("misc:font_family");
 
-    if (!searchTextTexture || searchTextCacheLabel != LABEL || std::abs(searchTextCacheScale - SCALE) > 0.001F) {
-        const auto FONT = ScrollOverview::Config::getValue<std::string>("misc:font_family");
-        searchTextTexture = g_pHyprRenderer->renderText(LABEL, CHyprColor{0.96F, 0.96F, 0.96F, 1.F}, std::max(1, sc<int>(std::round(17.F * SCALE))), false,
-                                                        FONT, MAXTEXTWIDTH, 500);
-        searchTextCacheLabel = LABEL;
-        searchTextCacheScale = SCALE;
+    auto textColor = CHyprColor{sc<uint64_t>(ScrollOverview::Config::getValue<Hyprlang::INT>("plugin:scrolloverview:search:text_color"))};
+    if (!HASQUERY) {
+        textColor = CHyprColor{sc<uint64_t>(ScrollOverview::Config::getValue<Hyprlang::INT>("plugin:scrolloverview:search:placeholder_color"))};
+        textColor = textColor.modifyA(textColor.a * std::clamp(ScrollOverview::Config::getValue<float>("plugin:scrolloverview:search:placeholder_opacity"), 0.F, 1.F));
     }
 
-    if (!searchTextTexture || !searchTextTexture->ok())
+    auto countColor = CHyprColor{sc<uint64_t>(ScrollOverview::Config::getValue<Hyprlang::INT>(
+        HASQUERY && RESULTS == 0 ? "plugin:scrolloverview:search:error_color" : "plugin:scrolloverview:search:accent_color"))};
+    if (!HASQUERY)
+        countColor = countColor.modifyA(countColor.a * 0.82F);
+
+    if (!searchCountTexture || searchCountCacheLabel != COUNTLABEL || std::abs(searchTextCacheScale - SCALE) > 0.001F || searchTextCacheWidth != CONTENTWIDTH) {
+        searchCountTexture    = g_pHyprRenderer->renderText(COUNTLABEL, countColor, std::max(1, sc<int>(std::round(FONTSIZE * 0.82F))), false, FONT,
+                                                           std::max(1, CONTENTWIDTH / 3), 400);
+        searchCountCacheLabel = COUNTLABEL;
+    }
+
+    const int QUERYMAXWIDTH = std::max(1, CONTENTWIDTH - sc<int>(searchCountTexture && searchCountTexture->ok() ? searchCountTexture->m_size.x + TEXTGAP : 0.F));
+    if (!searchQueryTexture || searchQueryCacheLabel != QUERYCACHEKEY || std::abs(searchTextCacheScale - SCALE) > 0.001F || searchTextCacheWidth != CONTENTWIDTH) {
+        searchQueryTexture    = g_pHyprRenderer->renderText(QUERYLABEL, textColor, FONTSIZE, false, FONT, QUERYMAXWIDTH, HASQUERY ? 500 : 400);
+        searchQueryCacheLabel = QUERYCACHEKEY;
+    }
+    searchTextCacheScale = SCALE;
+    searchTextCacheWidth = CONTENTWIDTH;
+
+    if (!searchQueryTexture || !searchQueryTexture->ok())
         return;
 
-    const float PADDINGX = 18.F * SCALE;
-    const float PADDINGY = 11.F * SCALE;
+    const float CONTENTHEIGHT = std::max(sc<float>(searchQueryTexture->m_size.y),
+                                         searchCountTexture && searchCountTexture->ok() ? sc<float>(searchCountTexture->m_size.y) : 0.F);
     CBox barBox{
-        std::round((VIEWWIDTH - searchTextTexture->m_size.x - PADDINGX * 2.F) / 2.F),
-        std::round(20.F * SCALE),
-        std::round(searchTextTexture->m_size.x + PADDINGX * 2.F),
-        std::round(searchTextTexture->m_size.y + PADDINGY * 2.F),
+        std::round((VIEWWIDTH - CARDWIDTH) / 2.F),
+        std::round(std::max(0, ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:top_offset")) * SCALE),
+        std::round(CARDWIDTH),
+        std::round(CONTENTHEIGHT + PADDINGY * 2.F),
     };
+
+    const int RADIUSCONFIG = ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:corner_radius");
+    const int RADIUS       = std::max(0, sc<int>(std::round((RADIUSCONFIG < 0 ? ScrollOverview::Config::getValue<int>("decoration:rounding") : RADIUSCONFIG) * SCALE)));
+    auto backgroundColor = CHyprColor{sc<uint64_t>(ScrollOverview::Config::getValue<Hyprlang::INT>("plugin:scrolloverview:search:background_color"))};
+    backgroundColor = backgroundColor.modifyA(backgroundColor.a * std::clamp(ScrollOverview::Config::getValue<float>("plugin:scrolloverview:search:background_opacity"), 0.F, 1.F));
 
     CRectPassElement::SRectData background;
     background.box           = barBox;
-    background.color         = CHyprColor{0.06F, 0.07F, 0.09F, 0.92F};
-    background.round         = std::max(1, sc<int>(std::round(10.F * SCALE)));
+    background.color         = backgroundColor;
+    background.round         = RADIUS;
     background.roundingPower = 2.F;
     g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(background));
 
-    CRectPassElement::SRectData accent;
-    accent.box           = CBox{barBox.x + PADDINGX, barBox.y + barBox.height - std::max(2.F, 2.F * SCALE), barBox.width - PADDINGX * 2.F, std::max(2.F, 2.F * SCALE)};
-    accent.color         = RESULTS == 0 ? CHyprColor{0.95F, 0.30F, 0.30F, 0.95F} : CHyprColor{0.35F, 0.70F, 1.F, 0.95F};
-    accent.round         = std::max(1, sc<int>(std::round(SCALE)));
-    accent.roundingPower = 2.F;
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(accent));
+    const int BORDERTHICKNESS = std::max(0, sc<int>(std::round(ScrollOverview::Config::getValue<int>("plugin:scrolloverview:search:border_thickness") * SCALE)));
+    if (BORDERTHICKNESS > 0) {
+        auto borderColor = CHyprColor{sc<uint64_t>(ScrollOverview::Config::getValue<Hyprlang::INT>("plugin:scrolloverview:search:border_color"))};
+        borderColor = borderColor.modifyA(borderColor.a * std::clamp(ScrollOverview::Config::getValue<float>("plugin:scrolloverview:search:border_opacity"), 0.F, 1.F));
+        CBorderPassElement::SBorderData border;
+        border.box           = barBox;
+        border.grad1         = Config::CGradientValueData{borderColor};
+        border.round         = RADIUS;
+        border.outerRound    = RADIUS;
+        border.borderSize    = BORDERTHICKNESS;
+        border.roundingPower = 2.F;
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CBorderPassElement>(border));
+    }
 
-    CTexPassElement::SRenderData textData;
-    textData.tex = searchTextTexture;
-    textData.box = CBox{barBox.x + PADDINGX, barBox.y + PADDINGY, searchTextTexture->m_size.x, searchTextTexture->m_size.y};
-    textData.a   = 1.F;
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(textData));
+    CTexPassElement::SRenderData queryData;
+    queryData.tex = searchQueryTexture;
+    queryData.box = CBox{barBox.x + PADDINGX, barBox.y + std::round((barBox.height - searchQueryTexture->m_size.y) / 2.F), searchQueryTexture->m_size.x,
+                         searchQueryTexture->m_size.y};
+    queryData.a   = 1.F;
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(queryData));
+
+    if (searchCountTexture && searchCountTexture->ok()) {
+        CTexPassElement::SRenderData countData;
+        countData.tex = searchCountTexture;
+        countData.box = CBox{barBox.x + barBox.width - PADDINGX - searchCountTexture->m_size.x,
+                             barBox.y + std::round((barBox.height - searchCountTexture->m_size.y) / 2.F), searchCountTexture->m_size.x, searchCountTexture->m_size.y};
+        countData.a   = 1.F;
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(countData));
+    }
     OverviewRender::flushPass(monitor);
 }
 
@@ -2173,6 +2227,90 @@ bool CScrollOverview::shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) 
     return shouldShowPinnedFloatingOverviewWindow(window) && windowMatchesSearch(window);
 }
 
+void CScrollOverview::rebuildSearchLayout() {
+    searchLayoutBoxes.clear();
+    if (!overviewSearchActive())
+        return;
+
+    for (const auto& image : images) {
+        if (!image || !image->pWorkspace)
+            continue;
+
+        std::vector<PHLWINDOW> windows;
+        std::vector<ScrollOverview::SearchLayout::SItem> items;
+        for (const auto& windowRef : image->windows) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            if (!shouldShowOverviewWindow(window) || window->m_isFloating || !window->layoutTarget() || std::ranges::find(windows, window) != windows.end())
+                continue;
+
+            auto box = window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+            if (box.empty())
+                box = window->layoutTarget()->position();
+            if (box.empty())
+                continue;
+
+            const size_t id = windows.size();
+            windows.emplace_back(window);
+            items.push_back({
+                .id      = id,
+                .box     = {.x = box.x, .y = box.y, .width = box.width, .height = box.height},
+                .matches = windowMatchesSearch(window),
+            });
+        }
+
+        if (items.empty())
+            continue;
+
+        bool primaryHorizontal = true;
+        if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(image->pWorkspace); ALGO && ALGO->m_scrollingData && ALGO->m_scrollingData->controller)
+            primaryHorizontal = ALGO->m_scrollingData->controller->isPrimaryHorizontal();
+        else {
+            double minX = std::numeric_limits<double>::max();
+            double minY = std::numeric_limits<double>::max();
+            double maxX = std::numeric_limits<double>::lowest();
+            double maxY = std::numeric_limits<double>::lowest();
+            for (const auto& item : items) {
+                minX = std::min(minX, item.box.x);
+                minY = std::min(minY, item.box.y);
+                maxX = std::max(maxX, item.box.x + item.box.width);
+                maxY = std::max(maxY, item.box.y + item.box.height);
+            }
+            primaryHorizontal = maxX - minX >= maxY - minY;
+        }
+
+        const auto compacted = ScrollOverview::SearchLayout::compact(
+            items, primaryHorizontal ? ScrollOverview::SearchLayout::EAxis::HORIZONTAL : ScrollOverview::SearchLayout::EAxis::VERTICAL);
+        for (const auto& result : compacted) {
+            if (result.id >= windows.size() || !windows[result.id])
+                continue;
+            searchLayoutBoxes[windows[result.id].get()] = CBox{result.box.x, result.box.y, result.box.width, result.box.height};
+        }
+    }
+}
+
+std::optional<CBox> CScrollOverview::searchLayoutGlobalBox(const PHLWINDOW& window_) const {
+    const auto window = getOverviewWindowToShow(window_);
+    if (!overviewSearchActive() || !window || window->m_isFloating)
+        return std::nullopt;
+
+    const auto it = searchLayoutBoxes.find(window.get());
+    return it == searchLayoutBoxes.end() ? std::nullopt : std::optional<CBox>{it->second};
+}
+
+CBox CScrollOverview::overviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
+                                        bool round) const {
+    if (const auto box = searchLayoutGlobalBox(window))
+        return getOverviewGlobalBox(*box, monitor, renderScale, currentViewOffset, workspaceOffset, layout, round);
+    return getOverviewWindowBox(window, monitor, renderScale, currentViewOffset, workspaceOffset, layout, round);
+}
+
+CBox CScrollOverview::overviewDragWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
+                                            bool round) const {
+    if (const auto box = searchLayoutGlobalBox(window))
+        return getOverviewGlobalBox(*box, monitor, renderScale, currentViewOffset, workspaceOffset, layout, round);
+    return getOverviewDragWindowBox(window, monitor, renderScale, currentViewOffset, workspaceOffset, layout, round);
+}
+
 size_t CScrollOverview::searchResultCount() const {
     std::vector<PHLWINDOW> counted;
     const auto             add = [&](const PHLWINDOW& candidate) {
@@ -2204,17 +2342,25 @@ size_t CScrollOverview::searchResultCount() const {
 void CScrollOverview::onSearchChanged() {
     const bool WASSEARCHACTIVE = !normalizedSearchQuery.empty();
     normalizedSearchQuery = ScrollOverview::Search::normalize(overviewSearchQuery());
-    searchTextCacheLabel.clear();
+    searchQueryCacheLabel.clear();
+    searchCountCacheLabel.clear();
 
     const auto selected = getOverviewWindowToShow(closeOnWindow.lock());
     if (!WASSEARCHACTIVE && overviewSearchActive() && selected &&
         (shouldShowOverviewWindow(selected) || shouldShowPinnedFloatingOverviewWindow(selected)))
         searchSelectionAnchor = selected;
 
+    rebuildSearchLayout();
     reconcileSearchSelection();
     if (!overviewSearchActive())
         searchSelectionAnchor.reset();
     markBlurDirty();
+    damage();
+}
+
+void CScrollOverview::onSearchConfigChanged() {
+    searchQueryCacheLabel.clear();
+    searchCountCacheLabel.clear();
     damage();
 }
 
@@ -2277,9 +2423,7 @@ void CScrollOverview::reconcileSearchSelection() {
             if (!shouldRenderOverviewWindow(window))
                 continue;
 
-            auto windowBox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
-            if (windowBox.empty() && window->layoutTarget())
-                windowBox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            const auto windowBox = overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset);
             const double score = workspacePenalty + overviewBoxCenterDistanceSquared(windowBox, workspaceBox);
             if (score >= bestScore)
                 continue;
@@ -2424,9 +2568,7 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
                 if (!shouldRenderOverviewWindow(window) || !window->m_isFloating)
                     continue;
 
-                auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
-                if (overviewSearchActive() && texbox.empty() && window->layoutTarget())
-                    texbox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                const auto texbox = overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset);
 
                 if (texbox.containsPoint(point))
                     return selectWindow(window);
@@ -2446,9 +2588,7 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
                 if (!shouldRenderOverviewWindow(window) || window->m_isFloating != floating)
                     continue;
 
-                auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
-                if (overviewSearchActive() && texbox.empty() && window->layoutTarget())
-                    texbox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                const auto texbox = overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset);
 
                 if (texbox.containsPoint(point))
                     return selectWindow(window);
@@ -2487,7 +2627,7 @@ PHLWINDOW CScrollOverview::windowClosestToWorkspaceCenter(size_t workspaceIdx) c
         if (HASFULLSCREENPATH && WINDOW != FULLSCREENWINDOW && !WINDOW->m_isFloating)
             continue;
 
-        const auto WINDOWBOX = getOverviewWindowBox(WINDOW, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto WINDOWBOX = overviewWindowBox(WINDOW, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET);
         const auto DISTANCE  = overviewBoxCenterDistanceSquared(WINDOWBOX, WORKSPACEBOX);
         if (DISTANCE >= bestDistance)
             continue;
@@ -2517,9 +2657,7 @@ PHLWINDOW CScrollOverview::windowAtOverviewCursorOnWorkspace(size_t workspaceIdx
             if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating != floating)
                 continue;
 
-            auto       box    = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
-            if (overviewSearchActive() && box.empty() && WINDOW->layoutTarget())
-                box = getOverviewGlobalBox(WINDOW->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
+            const auto box    = overviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET);
             const auto hitbox = expandOverviewWindowHitbox(box, scale->value(), MONITOR->m_scale);
             if (box.containsPoint(lastMousePosLocal)) {
                 if (windowBox)
@@ -2577,8 +2715,8 @@ CDropIndicator::SDropAnchor CScrollOverview::dropAnchorAtOverviewCursorOnWorkspa
     const auto boxesForWindow = [&](const PHLWINDOW& window) {
         const auto TARGET = window->layoutTarget();
         return std::pair{
-            getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout, false),
-            TARGET ? getOverviewGlobalBox(TARGET->position(), MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout, false) : CBox{},
+            overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, false),
+            TARGET ? overviewDragWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, false) : CBox{},
         };
     };
     const auto setAnchor = [](CDropIndicator::SDropAnchor& anchor, const PHLWINDOW& window, const CBox& box, const CBox& logicalBox = {}, const std::string& direction = {}) {
@@ -2789,7 +2927,7 @@ PHLWORKSPACE CScrollOverview::workspaceAtOverviewDropPoint(const Vector2D& point
                 if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == draggedWindow || WINDOW->m_isFloating != floating)
                     continue;
 
-                const auto WINDOWBOX = getOverviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+                const auto WINDOWBOX = overviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET);
                 if (!WINDOWBOX.containsPoint(point))
                     continue;
 
@@ -2926,7 +3064,7 @@ CBox CScrollOverview::draggedWindowBox(size_t workspaceIdx) const {
         return {};
 
     const auto WORKSPACE_OFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-    auto       box               = getOverviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
+    auto       box               = overviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET);
     box.x = lastMousePosLocal.x - dragGrabOffsetLocal.x;
     box.y = lastMousePosLocal.y - dragGrabOffsetLocal.y;
 
@@ -2940,7 +3078,7 @@ CBox CScrollOverview::draggedWindowBoxFor(PHLWINDOW window, size_t workspaceIdx,
         return {};
 
     const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-    auto       box             = getOverviewDragWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+    auto       box             = overviewDragWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET);
     box.x = pointLocal.x - box.width * std::clamp(grabRatio.x, 0.0, 1.0);
     box.y = pointLocal.y - box.height * std::clamp(grabRatio.y, 0.0, 1.0);
     return box;
@@ -2958,8 +3096,7 @@ CBox CScrollOverview::draggedWindowGlobalBox() const {
 
     const auto WORKSPACEOFFSET =
         workspaceOverviewOffset(WORKSPACEIDX, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-    const auto SOURCEBOX =
-        getOverviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout, false);
+    const auto SOURCEBOX = overviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, false);
     const auto GLOBALSIZE = SOURCEBOX.size() * (1.F / std::max(MONITOR->m_scale, 0.01F));
     const auto CURSOR     = g_pInputManager->getMouseCoordsInternal();
 
@@ -2989,6 +3126,13 @@ void CScrollOverview::refreshDragOriginalOverviewBoxes() {
     if (workspaceIdx >= images.size())
         return;
 
+    const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
+    if (const auto compactBox = searchLayoutGlobalBox(WINDOW)) {
+        dragOriginalOverviewBox = getOverviewGlobalBox(*compactBox, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+        dragOriginalOverviewHitbox = getOverviewGlobalBox(*compactBox, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout, false);
+        return;
+    }
+
     Vector2D tapeDelta;
     if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(WORKSPACE); ALGO && ALGO->m_scrollingData && ALGO->m_scrollingData->controller)
         tapeDelta = overviewScrollingCameraTranslation(ALGO) - dragOriginalTapeTranslation;
@@ -2998,7 +3142,6 @@ void CScrollOverview::refreshDragOriginalOverviewBoxes() {
     visualBox.translate(tapeDelta);
     hitbox.translate(tapeDelta);
 
-    const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
     dragOriginalOverviewBox    = getOverviewGlobalBox(visualBox, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
     dragOriginalOverviewHitbox = getOverviewGlobalBox(hitbox, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout, false);
 }
@@ -3083,7 +3226,7 @@ void CScrollOverview::beginWindowDrag(PHLWINDOW window) {
     const auto MONITOR = pMonitor.lock();
     if (MONITOR && workspaceIdx < images.size()) {
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-        const auto WINDOWBOX       = getOverviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto WINDOWBOX       = overviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET);
         snapshot.grabOffsetLocal   = dragStartMouseLocal - WINDOWBOX.pos();
         snapshot.grabRatio         = Vector2D{
             WINDOWBOX.width > 0.0 ? snapshot.grabOffsetLocal.x / WINDOWBOX.width : 0.5,
@@ -3180,7 +3323,7 @@ void CScrollOverview::beginWindowResize() {
     }
 
     const auto WORKSPACEOFFSET = workspaceOverviewOffset(resizeWorkspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-    resizeOriginalBox   = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+    resizeOriginalBox   = overviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET);
     resizeActiveWindow  = WINDOW;
     resizeLastMouseLocal = lastMousePosLocal;
 
@@ -3413,7 +3556,7 @@ void CScrollOverview::focusMostVisibleScrollingWindow(const PHLWORKSPACE& worksp
 
     const auto preferredWindow = getOverviewWindowToShow(scrollingPanInitialWindow.lock());
     if (shouldRenderOverviewWindow(preferredWindow) && preferredWindow->m_workspace == workspace && !preferredWindow->m_isFloating && preferredWindow->layoutTarget()) {
-        const auto WINDOWBOX   = preferredWindow->layoutTarget()->position();
+        const auto WINDOWBOX   = searchLayoutGlobalBox(preferredWindow).value_or(preferredWindow->layoutTarget()->position());
         const auto AREA        = overviewBoxArea(WINDOWBOX);
         const auto VISIBLEAREA = overviewBoxIntersectionArea(WINDOWBOX, WORKSPACEBOX);
         if (AREA > 0.0 && std::abs(VISIBLEAREA - AREA) < 0.5) {
@@ -3429,7 +3572,7 @@ void CScrollOverview::focusMostVisibleScrollingWindow(const PHLWORKSPACE& worksp
         if (!shouldRenderOverviewWindow(WINDOW) || WINDOW->m_workspace != workspace || WINDOW->m_isFloating || !WINDOW->layoutTarget())
             continue;
 
-        const auto WINDOWBOX = WINDOW->layoutTarget()->position();
+        const auto WINDOWBOX = searchLayoutGlobalBox(WINDOW).value_or(WINDOW->layoutTarget()->position());
         const auto AREA      = overviewBoxArea(WINDOWBOX);
         if (AREA <= 0.0)
             continue;
@@ -4126,9 +4269,7 @@ bool CScrollOverview::moveSearchSelection(const std::string& direction) {
             const auto window = getOverviewWindowToShow(windowRef.lock());
             if (!shouldRenderOverviewWindow(window) || std::ranges::find(added, window) != added.end())
                 continue;
-            auto box = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
-            if (box.empty() && window->layoutTarget())
-                box = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            const auto box = overviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset);
             if (box.empty())
                 continue;
             added.emplace_back(window);
@@ -4773,9 +4914,7 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
         if (dragActiveWindow && window == getOverviewWindowToShow(dragActiveWindow.lock()))
             return;
 
-        auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
-        if (overviewSearchActive() && windowBox.empty() && window->layoutTarget())
-            windowBox = getOverviewGlobalBox(window->layoutTarget()->position(), monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto windowBox = overviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET);
         if (!overviewBoxIntersectsMonitor(windowBox, monitor))
             return;
 
@@ -4888,7 +5027,7 @@ bool CScrollOverview::hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t
             if (!shouldRenderOverviewWindow(window) || window == DRAGGEDWINDOW || !OverviewWindow::shouldUseBlurFramebuffer(window))
                 return false;
 
-            const auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
+            const auto windowBox = overviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET);
             return overviewBoxIntersectsMonitor(windowBox, monitor);
         };
 
@@ -5045,6 +5184,7 @@ void CScrollOverview::redrawAll(bool forcelowres) {
         addPinnedFloatingWindow(window);
     }
 
+    rebuildSearchLayout();
     updateWorkspaceOverflow();
 }
 
@@ -5097,7 +5237,7 @@ bool CScrollOverview::isVisibleRealtimePreviewWindow(const PHLWINDOW& window) co
             return false;
 
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        const auto WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto WINDOWBOX        = overviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET);
         return overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR);
     }
 
@@ -5264,9 +5404,7 @@ bool CScrollOverview::shouldSuppressRenderDamage() const {
         if (!shouldRenderOverviewWindow(window) || window == DRAGGED)
             return false;
 
-        auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
-        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
-            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+        const auto WINDOWBOX = overviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset);
         return overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR) && windowHasOverviewAnimation(window);
     };
 
@@ -5346,9 +5484,7 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
 
         const bool ISDRAGGED = window == DRAGGED;
         if (!ISDRAGGED) {
-            auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
-            if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
-                WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+            const auto WINDOWBOX = overviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset);
             if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
                 return;
         }
@@ -5490,9 +5626,7 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
         }
 
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        auto       WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
-        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
-            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto WINDOWBOX        = overviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET);
         if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
             return false;
 
@@ -5596,9 +5730,7 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         }
 
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        auto       WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
-        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
-            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto WINDOWBOX        = overviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET);
         if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
             return false;
 
@@ -5802,6 +5934,7 @@ void CScrollOverview::onPreRender() {
         pMonitor->m_solitaryClient.reset();
 
     forceLayersAboveFullscreen();
+    rebuildSearchLayout();
     updateWorkspaceOverflow();
 
     if (closing)

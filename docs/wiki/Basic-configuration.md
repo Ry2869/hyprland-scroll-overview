@@ -40,6 +40,23 @@ end)
 | wallpaper | int | wallpaper mode: `0` global only, `1` per-workspace only, `2` both | `0` |
 | blur | bool | blur the main overview wallpaper without blurring workspace wallpapers | `false` |
 | search.enabled | bool | enable native type-to-search while the overview is open | `true` |
+| search.background_color | color | native search card background color | `rgba(111318ff)` |
+| search.background_opacity | float | multiplier for search card background opacity | `0.92` |
+| search.text_color | color | search query text color | `rgba(f2f4f8ff)` |
+| search.placeholder_color | color | empty-query placeholder color | `rgba(a0a7b4ff)` |
+| search.placeholder_opacity | float | multiplier for placeholder opacity | `0.58` |
+| search.border_color | color | search card border color | `rgba(5b6472ff)` |
+| search.border_opacity | float | multiplier for search card border opacity | `0.75` |
+| search.border_thickness | int | search card border thickness in logical pixels | `2` |
+| search.accent_color | color | result-count accent color | `rgba(7aa2f7ff)` |
+| search.error_color | color | zero-result count color | `rgba(ff5c57ff)` |
+| search.corner_radius | int | card corner radius in logical pixels; `-1` follows `decoration:rounding` | `-1` |
+| search.padding_x | int | horizontal card padding in logical pixels | `18` |
+| search.padding_y | int | vertical card padding in logical pixels | `12` |
+| search.font_size | int | query font size in logical pixels | `16` |
+| search.width_ratio | float | maximum card width as a fraction of monitor width | `0.5` |
+| search.max_width | int | maximum card width in logical pixels | `640` |
+| search.top_offset | int | top-centred card offset in logical pixels | `20` |
 | input | structure | input configuration subcategory; accepts a structure containing the properties listed below | see below |
 | shadow | structure | shadow configuration subcategory; accepts a structure containing the properties listed below | see below |
 

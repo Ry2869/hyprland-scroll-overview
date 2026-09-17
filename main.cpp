@@ -662,6 +662,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_configReloadHook = Event::bus()->m_events.config.reloaded.listen([] {
         if (!ScrollOverview::Config::getSearchEnabled())
             clearOverviewSearchQuery();
+        for (const auto& overview : scrollOverviews()) {
+            if (overview)
+                overview->onSearchConfigChanged();
+        }
         reconcileNativeDragHook();
     });
 

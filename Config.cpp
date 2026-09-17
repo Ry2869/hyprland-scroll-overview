@@ -295,6 +295,45 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CBoolValue>("plugin:scrolloverview:search:enabled", "enable native overview type-to-search", true));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:background_color", "search card background color", 0x111318FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CFloatValue>("plugin:scrolloverview:search:background_opacity", "search card background opacity", 0.92F,
+                                                          SFloatValueOptions{.min = 0.F, .max = 1.F}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:text_color", "search query text color", 0xF2F4F8FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:placeholder_color", "search placeholder color", 0xA0A7B4FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CFloatValue>("plugin:scrolloverview:search:placeholder_opacity", "search placeholder opacity", 0.58F,
+                                                          SFloatValueOptions{.min = 0.F, .max = 1.F}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:border_color", "search card border color", 0x5B6472FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CFloatValue>("plugin:scrolloverview:search:border_opacity", "search card border opacity", 0.75F,
+                                                          SFloatValueOptions{.min = 0.F, .max = 1.F}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:border_thickness", "search card border thickness", 2, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:accent_color", "search result count accent color", 0x7AA2F7FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:search:error_color", "search zero-result color", 0xFF5C57FF));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:corner_radius", "search card corner radius; -1 follows decoration rounding", -1,
+                                                        SIntValueOptions{.min = -1}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:padding_x", "search card horizontal padding", 18, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:padding_y", "search card vertical padding", 12, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:font_size", "search query font size", 16, SIntValueOptions{.min = 1}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CFloatValue>("plugin:scrolloverview:search:width_ratio", "maximum search card width as a monitor width ratio", 0.5F,
+                                                          SFloatValueOptions{.min = 0.1F, .max = 1.F}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:max_width", "maximum search card width", 640, SIntValueOptions{.min = 120}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:top_offset", "search card top offset", 20, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,

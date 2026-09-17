@@ -45,6 +45,23 @@ plugin {
 
         search {
             enabled = true # type while the overview is open to filter windows
+            background_color = rgba(111318ff)
+            background_opacity = 0.92
+            text_color = rgba(f2f4f8ff)
+            placeholder_color = rgba(a0a7b4ff)
+            placeholder_opacity = 0.58
+            border_color = rgba(5b6472ff)
+            border_opacity = 0.75
+            border_thickness = 2
+            accent_color = rgba(7aa2f7ff)
+            error_color = rgba(ff5c57ff)
+            corner_radius = -1 # -1 follows decoration:rounding
+            padding_x = 18
+            padding_y = 12
+            font_size = 16
+            width_ratio = 0.5
+            max_width = 640
+            top_offset = 20
         }
 
         shadow {
@@ -92,7 +109,11 @@ This setting does not affect overview-origin drags with `toggle all` because eve
 
 ## Type-to-search
 
-With the overview open, typing text filters windows by title and application class/app ID without changing their workspace positions. The query is shared by all open monitor overviews. Use Backspace to edit, Escape to clear a non-empty query (or close when it is empty), the arrow keys to navigate matches, and Enter to activate the selected match. Set `search.enabled = false` to retain the pre-search keyboard behavior.
+With the overview open, typing text filters windows by title and application class/app ID. The query is shared by all open monitor overviews. Matching tiled windows are visually compacted within each existing workspace row, preserving their order without changing the real Hyprland layout. Floating and pinned windows keep their normal positions. Clearing the query restores the exact unfiltered overview geometry.
+
+The top-centred native search card shows a placeholder before typing and a per-monitor result count. Its colors, opacity, border, sizing, rounding, and placement are configurable through the generic `search` options above, so external theme tooling can update it without the plugin depending on a particular desktop shell.
+
+Use Backspace to edit, Escape to clear a non-empty query (or close when it is empty), the arrow keys to navigate matches, and Enter to activate the selected match. Set `search.enabled = false` to retain the pre-search keyboard behavior.
 
 Search input supports UTF-8 characters produced directly by the active XKB layout. Full input-method composition through fcitx/ibus is not currently available because the plugin does not own a Wayland text-input surface. Command-modified keys such as `SUPER+SHIFT+Left` remain available to Hyprland and overview submaps.
 

@@ -38,6 +38,7 @@ class IOverview {
     virtual bool  moveSelection(const std::string& direction) = 0;
     virtual bool  windowDispatcherAction(const std::string& action) = 0;
     virtual void  onSearchChanged() = 0;
+    virtual void  onSearchConfigChanged() = 0;
     virtual size_t searchResultCount() const = 0;
 
     virtual void  fullRender() = 0;

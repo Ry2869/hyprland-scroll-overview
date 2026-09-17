@@ -41,7 +41,7 @@ install(TARGETS scrolloverview)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(scrolloverview-search-tests Search.cpp tests/SearchTests.cc)
+    add_executable(scrolloverview-search-tests Search.cpp SearchLayout.cpp tests/SearchTests.cc)
     target_include_directories(scrolloverview-search-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(scrolloverview-search-tests PRIVATE PkgConfig::deps)
     add_test(NAME scrolloverview-search-tests COMMAND scrolloverview-search-tests)
