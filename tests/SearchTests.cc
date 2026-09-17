@@ -52,73 +52,129 @@ int main() {
         return it == results.end() ? SBox{} : it->box;
     };
     const auto near = [](double lhs, double rhs) { return std::abs(lhs - rhs) < 0.001; };
-
-    const std::vector<SItem> middleHidden = {
-        {.id = 1, .box = {0, 0, 100, 100}, .matches = true},
-        {.id = 2, .box = {110, 0, 100, 100}, .matches = false},
-        {.id = 3, .box = {220, 0, 100, 100}, .matches = true},
+    const auto sameBox = [&near](const SBox& lhs, const SBox& rhs) {
+        return near(lhs.x, rhs.x) && near(lhs.y, rhs.y) && near(lhs.width, rhs.width) && near(lhs.height, rhs.height);
     };
-    auto compacted = ScrollOverview::SearchLayout::compact(middleHidden, EAxis::HORIZONTAL);
+    const SBox viewport = {0, 0, 1920, 1080};
+
+    const std::vector<SItem> oneFilteredMatch = {
+        {.id = 1, .box = {0, 0, 900, 600}, .matches = true},
+        {.id = 2, .box = {910, 0, 900, 600}, .matches = false},
+    };
+    const auto centredSingle = ScrollOverview::SearchLayout::compact(oneFilteredMatch, EAxis::HORIZONTAL, viewport);
+    CHECK(centredSingle.size() == 1);
+    CHECK(sameBox(boxFor(centredSingle, 1), {510, 240, 900, 600}));
+
+    const std::vector<std::vector<SItem>> singleMatchLayouts = {
+        {{{.id = 3, .box = {510, 240, 900, 600}, .matches = true}}},
+        {{{.id = 1, .box = {0, 0, 900, 600}, .matches = false}, {.id = 3, .box = {910, 0, 900, 600}, .matches = true}}},
+        {{{.id = 1, .box = {0, 0, 900, 600}, .matches = false},
+          {.id = 2, .box = {910, 0, 900, 600}, .matches = false},
+          {.id = 3, .box = {1820, 0, 900, 600}, .matches = true}}},
+        {{{.id = 3, .box = {0, 0, 900, 600}, .matches = true},
+          {.id = 4, .box = {910, 0, 900, 600}, .matches = false},
+          {.id = 5, .box = {1820, 0, 900, 600}, .matches = false}}},
+        {{{.id = 1, .box = {0, 0, 900, 600}, .matches = false},
+          {.id = 3, .box = {910, 0, 900, 600}, .matches = true},
+          {.id = 4, .box = {1820, 0, 900, 600}, .matches = false}}},
+    };
+    for (const auto& layoutItems : singleMatchLayouts) {
+        const auto compacted = ScrollOverview::SearchLayout::compact(layoutItems, EAxis::HORIZONTAL, viewport);
+        CHECK(compacted.size() == 1);
+        CHECK(sameBox(boxFor(compacted, 3), {510, 240, 900, 600}));
+    }
+
+    const std::vector<SItem> twoAdjacentMatches = {
+        {.id = 1, .box = {0, 0, 700, 600}, .matches = true},
+        {.id = 2, .box = {710, 0, 700, 600}, .matches = true},
+        {.id = 3, .box = {1420, 0, 700, 600}, .matches = false},
+    };
+    auto compacted = ScrollOverview::SearchLayout::compact(twoAdjacentMatches, EAxis::HORIZONTAL, viewport);
+    CHECK(sameBox(boxFor(compacted, 1), {255, 240, 700, 600}));
+    CHECK(sameBox(boxFor(compacted, 2), {965, 240, 700, 600}));
+
+    const std::vector<SItem> hiddenBetween = {
+        {.id = 1, .box = {0, 0, 700, 600}, .matches = true},
+        {.id = 2, .box = {710, 0, 700, 600}, .matches = false},
+        {.id = 3, .box = {1420, 0, 700, 600}, .matches = true},
+    };
+    compacted = ScrollOverview::SearchLayout::compact(hiddenBetween, EAxis::HORIZONTAL, viewport);
     CHECK(compacted.size() == 2);
-    CHECK(near(boxFor(compacted, 1).x, 0));
-    CHECK(near(boxFor(compacted, 3).x, 110));
+    CHECK(sameBox(boxFor(compacted, 1), {255, 240, 700, 600}));
+    CHECK(sameBox(boxFor(compacted, 3), {965, 240, 700, 600}));
 
-    auto firstHidden = middleHidden;
-    firstHidden[0].matches = false;
-    firstHidden[1].matches = true;
-    compacted = ScrollOverview::SearchLayout::compact(firstHidden, EAxis::HORIZONTAL);
-    CHECK(compacted.size() == 2);
-    CHECK(near(boxFor(compacted, 2).x, 0));
-    CHECK(near(boxFor(compacted, 3).x, 110));
-
-    auto lastHidden = middleHidden;
-    lastHidden[1].matches = true;
-    lastHidden[2].matches = false;
-    compacted = ScrollOverview::SearchLayout::compact(lastHidden, EAxis::HORIZONTAL);
-    CHECK(compacted.size() == 2);
-    CHECK(near(boxFor(compacted, 1).x, 0));
-    CHECK(near(boxFor(compacted, 2).x, 110));
-
-    auto singleMatch = middleHidden;
-    singleMatch[0].matches = false;
-    compacted = ScrollOverview::SearchLayout::compact(singleMatch, EAxis::HORIZONTAL);
-    CHECK(compacted.size() == 1);
-    CHECK(near(boxFor(compacted, 3).x, 0));
-
-    auto noMatches = middleHidden;
-    noMatches[0].matches = false;
-    noMatches[2].matches = false;
-    CHECK(ScrollOverview::SearchLayout::compact(noMatches, EAxis::HORIZONTAL).empty());
-
-    const std::vector<SItem> stacked = {
-        {.id = 1, .box = {0, 0, 100, 50}, .matches = true},
-        {.id = 2, .box = {0, 60, 100, 50}, .matches = false},
-        {.id = 3, .box = {0, 120, 100, 50}, .matches = true},
+    const std::vector<SItem> verticalPrimary = {
+        {.id = 1, .box = {0, 0, 600, 400}, .matches = true},
+        {.id = 2, .box = {0, 410, 600, 400}, .matches = false},
+        {.id = 3, .box = {0, 820, 600, 400}, .matches = true},
     };
-    compacted = ScrollOverview::SearchLayout::compact(stacked, EAxis::HORIZONTAL);
-    CHECK(near(boxFor(compacted, 3).y, 60));
+    compacted = ScrollOverview::SearchLayout::compact(verticalPrimary, EAxis::VERTICAL, viewport);
+    CHECK(sameBox(boxFor(compacted, 1), {660, 135, 600, 400}));
+    CHECK(sameBox(boxFor(compacted, 3), {660, 545, 600, 400}));
 
-    const std::vector<SItem> verticalColumns = {
-        {.id = 1, .box = {0, 0, 50, 100}, .matches = true},
-        {.id = 2, .box = {0, 110, 50, 100}, .matches = false},
-        {.id = 3, .box = {0, 220, 50, 100}, .matches = true},
+    const std::vector<SItem> secondaryStack = {
+        {.id = 1, .box = {0, 0, 900, 300}, .matches = true},
+        {.id = 2, .box = {0, 310, 900, 300}, .matches = false},
+        {.id = 3, .box = {0, 620, 900, 300}, .matches = true},
     };
-    const auto verticalCompacted = ScrollOverview::SearchLayout::compact(verticalColumns, EAxis::VERTICAL);
-    CHECK(near(boxFor(verticalCompacted, 3).y, 110));
+    compacted = ScrollOverview::SearchLayout::compact(secondaryStack, EAxis::HORIZONTAL, viewport);
+    CHECK(sameBox(boxFor(compacted, 1), {510, 235, 900, 300}));
+    CHECK(sameBox(boxFor(compacted, 3), {510, 545, 900, 300}));
 
-    const std::vector<SItem> secondWorkspace = {
-        {.id = 4, .box = {500, 400, 80, 80}, .matches = false},
-        {.id = 5, .box = {590, 400, 80, 80}, .matches = true},
+    const std::vector<SItem> verticalSecondaryStack = {
+        {.id = 1, .box = {0, 0, 300, 900}, .matches = true},
+        {.id = 2, .box = {310, 0, 300, 900}, .matches = false},
+        {.id = 3, .box = {620, 0, 300, 900}, .matches = true},
     };
-    const auto secondRow = ScrollOverview::SearchLayout::compact(secondWorkspace, EAxis::HORIZONTAL);
-    CHECK(near(boxFor(secondRow, 5).x, 500));
-    CHECK(near(boxFor(compacted, 1).x, 0));
+    compacted = ScrollOverview::SearchLayout::compact(verticalSecondaryStack, EAxis::VERTICAL, viewport);
+    CHECK(sameBox(boxFor(compacted, 1), {655, 90, 300, 900}));
+    CHECK(sameBox(boxFor(compacted, 3), {965, 90, 300, 900}));
 
-    auto allMatching = middleHidden;
+    for (const auto& matches : {std::pair{true, false}, std::pair{false, true}}) {
+        auto soleStackMatch       = secondaryStack;
+        soleStackMatch[0].matches = matches.first;
+        soleStackMatch[2].matches = matches.second;
+        compacted = ScrollOverview::SearchLayout::compact(soleStackMatch, EAxis::HORIZONTAL, viewport);
+        CHECK(compacted.size() == 1);
+        CHECK(sameBox(compacted.front().box, {510, 390, 900, 300}));
+    }
+
+    const SBox topBarViewport = {0, 30, 1920, 1050};
+    compacted = ScrollOverview::SearchLayout::compact(oneFilteredMatch, EAxis::HORIZONTAL, topBarViewport);
+    CHECK(sameBox(boxFor(compacted, 1), {510, 255, 900, 600}));
+
+    const SBox positiveOrigin = {1920, 30, 1920, 1050};
+    compacted = ScrollOverview::SearchLayout::compact(oneFilteredMatch, EAxis::HORIZONTAL, positiveOrigin);
+    CHECK(sameBox(boxFor(compacted, 1), {2430, 255, 900, 600}));
+
+    const SBox negativeOrigin = {-1920, 30, 1920, 1050};
+    compacted = ScrollOverview::SearchLayout::compact(oneFilteredMatch, EAxis::HORIZONTAL, negativeOrigin);
+    CHECK(sameBox(boxFor(compacted, 1), {-1410, 255, 900, 600}));
+
+    auto noMatches = hiddenBetween;
+    for (auto& item : noMatches)
+        item.matches = false;
+    CHECK(ScrollOverview::SearchLayout::compact(noMatches, EAxis::HORIZONTAL, viewport).empty());
+
+    auto allMatching = hiddenBetween;
     for (auto& item : allMatching)
         item.matches = true;
-    const auto restored = ScrollOverview::SearchLayout::compact(allMatching, EAxis::HORIZONTAL);
-    CHECK(near(boxFor(restored, 3).x, 220));
+    const auto restored = ScrollOverview::SearchLayout::compact(allMatching, EAxis::HORIZONTAL, positiveOrigin);
+    for (const auto& item : allMatching)
+        CHECK(sameBox(boxFor(restored, item.id), item.box));
+
+    const std::vector<SItem> oversized = {
+        {.id = 1, .box = {0, 0, 900, 600}, .matches = true},
+        {.id = 2, .box = {910, 0, 900, 600}, .matches = true},
+        {.id = 3, .box = {1820, 0, 900, 600}, .matches = true},
+        {.id = 4, .box = {2730, 0, 900, 600}, .matches = false},
+    };
+    compacted = ScrollOverview::SearchLayout::compact(oversized, EAxis::HORIZONTAL, viewport, 2);
+    CHECK(near(boxFor(compacted, 2).x, 510));
+    CHECK(near(boxFor(compacted, 1).x, -400));
+    compacted = ScrollOverview::SearchLayout::compact(oversized, EAxis::HORIZONTAL, viewport, 3);
+    CHECK(near(boxFor(compacted, 3).x, 1020));
+    CHECK(near(boxFor(compacted, 1).x, -800));
 
     return 0;
 }

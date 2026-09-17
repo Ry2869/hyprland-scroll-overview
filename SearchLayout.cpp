@@ -39,6 +39,21 @@ void setSecondaryStart(SBox& box, EAxis axis, double value) {
         box.x = value;
 }
 
+double axisStart(const SBox& box, EAxis axis) {
+    return axis == EAxis::HORIZONTAL ? box.x : box.y;
+}
+
+double axisSize(const SBox& box, EAxis axis) {
+    return axis == EAxis::HORIZONTAL ? box.width : box.height;
+}
+
+void translateAxis(SBox& box, EAxis axis, double value) {
+    if (axis == EAxis::HORIZONTAL)
+        box.x += value;
+    else
+        box.y += value;
+}
+
 struct SBand {
     std::vector<const SItem*> items;
     double                    start = 0.0;
@@ -65,9 +80,48 @@ double minimumSecondaryGap(std::vector<const SItem*> items, EAxis axis) {
     return gap == std::numeric_limits<double>::max() ? 0.0 : gap;
 }
 
+SBox occupiedBounds(const std::vector<SResult>& results) {
+    if (results.empty())
+        return {};
+
+    double left   = results.front().box.x;
+    double top    = results.front().box.y;
+    double right  = left + results.front().box.width;
+    double bottom = top + results.front().box.height;
+    for (const auto& result : results) {
+        left   = std::min(left, result.box.x);
+        top    = std::min(top, result.box.y);
+        right  = std::max(right, result.box.x + result.box.width);
+        bottom = std::max(bottom, result.box.y + result.box.height);
+    }
+
+    return {.x = left, .y = top, .width = right - left, .height = bottom - top};
 }
 
-std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis) {
+double alignmentOffset(const SBox& occupied, const SBox& target, const SBox* selected, EAxis axis) {
+    const double occupiedStart = axisStart(occupied, axis);
+    const double occupiedSize  = axisSize(occupied, axis);
+    const double targetStart   = axisStart(target, axis);
+    const double targetSize    = axisSize(target, axis);
+
+    if (targetSize <= 0.0)
+        return -occupiedStart;
+
+    if (occupiedSize <= targetSize)
+        return targetStart + (targetSize - occupiedSize) / 2.0 - occupiedStart;
+
+    if (!selected)
+        return targetStart - occupiedStart;
+
+    const double desired = targetStart + targetSize / 2.0 - (axisStart(*selected, axis) + axisSize(*selected, axis) / 2.0);
+    const double minimum = targetStart + targetSize - (occupiedStart + occupiedSize);
+    const double maximum = targetStart - occupiedStart;
+    return std::clamp(desired, minimum, maximum);
+}
+
+}
+
+std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis, const SBox& targetBox, std::optional<size_t> selectedId) {
     std::vector<const SItem*> ordered;
     ordered.reserve(items.size());
     for (const auto& item : items) {
@@ -107,7 +161,7 @@ std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis)
         return {};
 
     const auto PRIMARYGAP = minimumGap(bands);
-    double     nextPrimary = bands.front().start;
+    double     nextPrimary = 0.0;
     std::vector<SResult> results;
 
     for (const auto& band : bands) {
@@ -124,10 +178,7 @@ std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis)
         });
 
         const auto SECONDARYGAP = minimumSecondaryGap(band.items, primaryAxis);
-        const auto FIRSTSECONDARY = *std::ranges::min_element(band.items, [primaryAxis](const auto* lhs, const auto* rhs) {
-            return secondaryStart(lhs->box, primaryAxis) < secondaryStart(rhs->box, primaryAxis);
-        });
-        double nextSecondary = secondaryStart(FIRSTSECONDARY->box, primaryAxis);
+        double nextSecondary = 0.0;
 
         double bandWidth = 0.0;
         for (const auto* item : matching) {
@@ -140,6 +191,19 @@ std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis)
         }
 
         nextPrimary += bandWidth + PRIMARYGAP;
+    }
+
+    if (results.empty())
+        return results;
+
+    const auto BOUNDS      = occupiedBounds(results);
+    const auto SELECTED    = selectedId ? std::ranges::find_if(results, [selectedId](const auto& result) { return result.id == *selectedId; }) : results.end();
+    const auto SELECTEDBOX = SELECTED == results.end() ? nullptr : &SELECTED->box;
+    const auto XOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::HORIZONTAL);
+    const auto YOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::VERTICAL);
+    for (auto& result : results) {
+        translateAxis(result.box, EAxis::HORIZONTAL, XOFFSET);
+        translateAxis(result.box, EAxis::VERTICAL, YOFFSET);
     }
 
     return results;

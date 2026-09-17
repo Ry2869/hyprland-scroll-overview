@@ -109,7 +109,9 @@ This setting does not affect overview-origin drags with `toggle all` because eve
 
 ## Type-to-search
 
-With the overview open, typing text filters windows by title and application class/app ID. The query is shared by all open monitor overviews. Matching tiled windows are visually compacted within each existing workspace row, preserving their order without changing the real Hyprland layout. Floating and pinned windows keep their normal positions. Clearing the query restores the exact unfiltered overview geometry.
+With the overview open, typing text filters windows by title and application class/app ID. The query is shared by all open monitor overviews. Matching tiled windows are visually compacted and centred in each workspace's usable area (including reserved bar space), preserving their order without changing the real Hyprland layout. Floating and pinned windows keep their normal positions. Clearing the query restores the exact unfiltered overview geometry.
+
+If a compacted result group is larger than its workspace's usable area, it is not resized. The selected result is centred where the group bounds permit; at an outer edge, the group is clamped so the viewport does not expose empty space. Arrow-key navigation updates this filtered presentation while the real scrolling layout continues to provide normal focus synchronization.
 
 The top-centred native search card shows a placeholder before typing and a per-monitor result count. Its colors, opacity, border, sizing, rounding, and placement are configurable through the generic `search` options above, so external theme tooling can update it without the plugin depending on a particular desktop shell.
 

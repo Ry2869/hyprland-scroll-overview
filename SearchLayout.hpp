@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace ScrollOverview::SearchLayout {
@@ -28,6 +29,10 @@ struct SResult {
     SBox   box;
 };
 
-std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis);
+// Boxes and targetBox use the same coordinate space. Filtering compacts matching
+// boxes at an origin-independent position, then aligns their occupied bounds to
+// targetBox. An all-matching input is returned unchanged.
+std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis, const SBox& targetBox,
+                             std::optional<size_t> selectedId = std::nullopt);
 
 }

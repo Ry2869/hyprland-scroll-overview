@@ -795,6 +795,22 @@ static bool isWorkspaceScrolling(const PHLWORKSPACE& workspace) {
     return overviewScrollingAlgorithmForWorkspace(workspace) != nullptr;
 }
 
+static CBox getWorkspaceGlobalUsableBox(const PHLWORKSPACE& workspace, PHLMONITOR monitor) {
+    if (!workspace || !monitor)
+        return {};
+
+    if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(workspace); ALGO && ALGO->m_scrollingData && ALGO->m_scrollingData->controller) {
+        auto usable = ALGO->usableArea();
+        usable.translate(monitor->m_position);
+        return usable;
+    }
+
+    if (workspace->m_space)
+        return workspace->m_space->workArea();
+
+    return monitor->logicalBoxMinusReserved();
+}
+
 static Vector2D overviewScrollingCameraTranslation(Layout::Tiled::CScrollingAlgorithm* algorithm) {
     if (!algorithm || !algorithm->m_scrollingData || !algorithm->m_scrollingData->controller)
         return {};
@@ -810,20 +826,11 @@ static CBox getOverviewWorkspaceUsableBox(const PHLWORKSPACE& workspace, PHLMONI
     if (!workspace || !monitor)
         return {};
 
-    if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(workspace); ALGO && ALGO->m_scrollingData && ALGO->m_scrollingData->controller) {
-        const auto USABLE = ALGO->usableArea();
-        return getOverviewBox(USABLE, monitor, scale, viewOffset, offset, layout);
-    }
-
-    if (!workspace->m_space)
-        return getOverviewWorkspaceBox(monitor, scale, viewOffset, offset, layout);
-
-    auto USABLE = workspace->m_space->workArea();
-    USABLE.translate(-monitor->m_position);
+    auto USABLE = getWorkspaceGlobalUsableBox(workspace, monitor);
     USABLE.w = std::max(USABLE.w, 1.0);
     USABLE.h = std::max(USABLE.h, 1.0);
 
-    return getOverviewBox(USABLE, monitor, scale, viewOffset, offset, layout);
+    return getOverviewGlobalBox(USABLE, monitor, scale, viewOffset, offset, layout);
 }
 
 static double clampOverviewScrollingOffset(Layout::Tiled::CScrollingAlgorithm* algo, double offset) {
@@ -1787,6 +1794,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     if (overviewSearchActive()) {
         rebuildSearchLayout();
         reconcileSearchSelection();
+        rebuildSearchLayout();
     }
 }
 
@@ -2261,6 +2269,12 @@ void CScrollOverview::rebuildSearchLayout() {
         if (items.empty())
             continue;
 
+        std::optional<size_t> selectedId;
+        const auto            selected   = getOverviewWindowToShow(closeOnWindow.lock());
+        const auto            selectedIt = std::ranges::find(windows, selected);
+        if (selectedIt != windows.end())
+            selectedId = sc<size_t>(std::distance(windows.begin(), selectedIt));
+
         bool primaryHorizontal = true;
         if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(image->pWorkspace); ALGO && ALGO->m_scrollingData && ALGO->m_scrollingData->controller)
             primaryHorizontal = ALGO->m_scrollingData->controller->isPrimaryHorizontal();
@@ -2278,8 +2292,11 @@ void CScrollOverview::rebuildSearchLayout() {
             primaryHorizontal = maxX - minX >= maxY - minY;
         }
 
+        const auto workspaceMonitor = image->pWorkspace->m_monitor ? image->pWorkspace->m_monitor.lock() : pMonitor.lock();
+        const auto target           = getWorkspaceGlobalUsableBox(image->pWorkspace, workspaceMonitor);
         const auto compacted = ScrollOverview::SearchLayout::compact(
-            items, primaryHorizontal ? ScrollOverview::SearchLayout::EAxis::HORIZONTAL : ScrollOverview::SearchLayout::EAxis::VERTICAL);
+            items, primaryHorizontal ? ScrollOverview::SearchLayout::EAxis::HORIZONTAL : ScrollOverview::SearchLayout::EAxis::VERTICAL,
+            {.x = target.x, .y = target.y, .width = target.width, .height = target.height}, selectedId);
         for (const auto& result : compacted) {
             if (result.id >= windows.size() || !windows[result.id])
                 continue;
@@ -2352,6 +2369,7 @@ void CScrollOverview::onSearchChanged() {
 
     rebuildSearchLayout();
     reconcileSearchSelection();
+    rebuildSearchLayout();
     if (!overviewSearchActive())
         searchSelectionAnchor.reset();
     markBlurDirty();
@@ -2983,6 +3001,8 @@ bool CScrollOverview::selectOverviewWindow(PHLWINDOW window, size_t workspaceIdx
     closeOnWindow            = window;
     viewportCurrentWorkspace = workspaceIdx;
     rememberSelection(window);
+    if (overviewSearchActive())
+        rebuildSearchLayout();
     if (syncFocus) {
         if (const auto MONITOR = pMonitor.lock(); MONITOR && Desktop::focusState()->monitor() != MONITOR)
             Desktop::focusState()->rawMonitorFocus(MONITOR);
@@ -4244,6 +4264,7 @@ bool CScrollOverview::moveSearchSelection(const std::string& direction) {
         return false;
 
     reconcileSearchSelection();
+    rebuildSearchLayout();
     const auto CURRENT = getOverviewWindowToShow(closeOnWindow.lock());
     if (!CURRENT)
         return false;
@@ -4361,6 +4382,7 @@ bool CScrollOverview::moveSearchSelection(const std::string& direction) {
         }
     }
 
+    rebuildSearchLayout();
     syncFocusedSelection();
     damage();
     return true;
@@ -5955,9 +5977,10 @@ void CScrollOverview::onPreRender() {
         rebuildPending = false;
         markBlurDirty();
         redrawAll();
-        if (overviewSearchActive())
+        if (overviewSearchActive()) {
             reconcileSearchSelection();
-        else
+            rebuildSearchLayout();
+        } else
             syncSelectionToViewport();
         damage();
         return;
@@ -6054,9 +6077,10 @@ void CScrollOverview::onWorkspaceChange() {
         *viewOffset = Vector2D{};
     }
 
-    if (overviewSearchActive())
+    if (overviewSearchActive()) {
         reconcileSearchSelection();
-    else
+        rebuildSearchLayout();
+    } else
         syncSelectionToViewport();
     markBlurDirty();
     damage();
