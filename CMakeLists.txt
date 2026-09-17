@@ -26,6 +26,7 @@ find_package(PkgConfig REQUIRED)
 pkg_search_module(lua REQUIRED IMPORTED_TARGET "lua5.4>=5.4" "lua>=5.4")
 pkg_check_modules(deps REQUIRED IMPORTED_TARGET
     hyprland
+    glib-2.0
     libdrm
     libinput
     libudev
@@ -37,3 +38,11 @@ pkg_check_modules(deps REQUIRED IMPORTED_TARGET
 target_link_libraries(scrolloverview PRIVATE rt PkgConfig::deps PkgConfig::lua)
 
 install(TARGETS scrolloverview)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(scrolloverview-search-tests Search.cpp tests/SearchTests.cc)
+    target_include_directories(scrolloverview-search-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(scrolloverview-search-tests PRIVATE PkgConfig::deps)
+    add_test(NAME scrolloverview-search-tests COMMAND scrolloverview-search-tests)
+endif()

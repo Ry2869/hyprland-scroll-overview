@@ -93,6 +93,7 @@ int           getScrollEventDelay();
 bool          getLeftHanded();
 int           getDragMode();
 int           getDragThreshold();
+bool          getSearchEnabled();
 float         getTouchpadScrollFactor();
 EScrollAction getVerticalScrollAction(ELayout layout);
 EScrollAction getHorizontalScrollAction(ELayout layout);

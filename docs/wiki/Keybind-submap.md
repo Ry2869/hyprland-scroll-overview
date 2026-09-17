@@ -2,6 +2,8 @@ Defining a `scrolloverview` submap replaces the built-in keyboard navigation in 
 
 While the submap is active, regular Hyprland keybinds defined outside it are not handled by default. Add `{ submap_universal = true }` to every standard bind that should remain available while the overview is open.
 
+Unmodified printable keys always start or extend the native overview search. While the query is non-empty, Backspace, Escape, the arrow keys, and Enter are handled by search before submap binds. When the query is empty, the existing submap bindings retain control of navigation, selection, and closing. Shortcuts using command modifiers such as SUPER, CTRL, or ALT continue through the normal Hyprland keybind path.
+
 Mouse wheel actions can also be bound inside the submap. If a scroll action is not bound, ScrollOverview continues to use its built-in behavior for that action. Defining a matching scroll bind overrides the built-in action for as long as the submap is active.
 
 ```lua

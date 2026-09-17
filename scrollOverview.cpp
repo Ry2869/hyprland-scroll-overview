@@ -67,6 +67,7 @@
 #include "OverviewOpen.hpp"
 #include "OverviewPassElement.hpp"
 #include "OverviewRender.hpp"
+#include "Search.hpp"
 #include "Window.hpp"
 
 static PHLWINDOW getOverviewFullscreenVisibilityWindow(const PHLWORKSPACE& workspace, const PHLWINDOW& fallback = {});
@@ -131,6 +132,24 @@ static xkb_keysym_t getOverviewKeysym(const IKeyboard::SKeyEvent& event) {
         return XKB_KEY_NoSymbol;
 
     return xkb_state_key_get_one_sym(STATE, event.keycode + 8);
+}
+
+static std::string getOverviewKeyText(const IKeyboard::SKeyEvent& event) {
+    const auto keyboard = g_pSeatManager->m_keyboard.lock();
+    if (!keyboard || !keyboard->m_xkbState)
+        return {};
+
+    const auto KEYCODE = event.keycode + 8;
+    const int  SIZE    = xkb_state_key_get_utf8(keyboard->m_xkbState, KEYCODE, nullptr, 0);
+    if (SIZE <= 0)
+        return {};
+
+    std::vector<char> buffer(sc<size_t>(SIZE) + 1, '\0');
+    const int         WRITTEN = xkb_state_key_get_utf8(keyboard->m_xkbState, KEYCODE, buffer.data(), buffer.size());
+    if (WRITTEN <= 0)
+        return {};
+
+    return std::string{buffer.data(), sc<size_t>(WRITTEN)};
 }
 
 static bool hasOverviewSubmap() {
@@ -960,6 +979,11 @@ CScrollOverview::~CScrollOverview() {
         wl_event_source_remove(realtimePreviewTimer);
         realtimePreviewTimer = nullptr;
     }
+    if (searchRepeatTimer) {
+        wl_event_source_remove(searchRepeatTimer);
+        searchRepeatTimer = nullptr;
+    }
+    searchTextTexture.reset();
     if (backdropBlurFB)
         backdropBlurFB->release();
     backdropBlurFB.reset();
@@ -995,6 +1019,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     applyInputConfigOverrides();
     g_pInputManager->unconstrainMouse();
     realtimePreviewTimer = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, realtimePreviewTimerCallback, this);
+    searchRepeatTimer    = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, searchRepeatTimerCallback, this);
     scheduleMinimumPreviewFrame();
 
     const auto WINDOWSMOVECONFIG = Config::animationTree()->getAnimationPropertyConfig("windowsMove");
@@ -1265,6 +1290,12 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             if (!shouldRunDefaultClickAction(button))
                 return;
 
+            if (overviewSearchActive()) {
+                if (selectWindowAtOverviewCursor(true))
+                    closeAll();
+                return;
+            }
+
             selectHoveredWorkspace();
             selectWindowAtOverviewCursor(true);
             closeAll();
@@ -1430,9 +1461,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
 
         info.cancelled = true;
 
-        selectWindowAtOverviewCursor(true);
-
-        closeAll();
+        if (!overviewSearchActive() || selectWindowAtOverviewCursor(true))
+            closeAll();
     };
 
     auto onMouseAxis = [this](IPointer::SAxisEvent e, Event::SCallbackInfo& info) {
@@ -1519,7 +1549,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         else
             emitFullscreenVisibilityState(overviewWindow, true);
 
-        if (shouldShowOverviewWindow(overviewWindow) && overviewWindow->m_monitor == pMonitor) {
+        if ((shouldRenderOverviewWindow(overviewWindow) || shouldRenderPinnedOverviewWindow(overviewWindow)) && overviewWindow->m_monitor == pMonitor) {
             rebuildPending = true;
             closeOnWindow  = overviewWindow;
             rememberSelection(overviewWindow);
@@ -1555,42 +1585,154 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     };
 
     auto onKeyboardKey = [this](IKeyboard::SKeyEvent event, Event::SCallbackInfo& info) {
-        if (closing || event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
+        if (event.state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+            if (!consumedSearchKeys.erase(event.keycode))
+                return;
+
+            info.cancelled = true;
+            if (searchRepeatKeycode == event.keycode)
+                stopSearchRepeat();
+            return;
+        }
+
+        if (info.cancelled || closing || event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
             return;
 
         const auto KEYSYM = getOverviewKeysym(event);
         if (activeScrollOverview().get() != this || isTopLayerFocused(pMonitor.lock()))
             return;
-        const auto MODS   = g_pInputManager->getModsFromAllKBs() & ~(HL_MODIFIER_CAPS | HL_MODIFIER_MOD2);
 
-        if ((KEYSYM == XKB_KEY_Return || KEYSYM == XKB_KEY_KP_Enter || KEYSYM == XKB_KEY_Left || KEYSYM == XKB_KEY_KP_Left || KEYSYM == XKB_KEY_Right ||
-             KEYSYM == XKB_KEY_KP_Right || KEYSYM == XKB_KEY_Up || KEYSYM == XKB_KEY_KP_Up || KEYSYM == XKB_KEY_Down || KEYSYM == XKB_KEY_KP_Down) &&
-            MODS != 0)
+        const auto MODS        = g_pInputManager->getModsFromAllKBs();
+        const auto COMMANDMODS = MODS & (HL_MODIFIER_CTRL | HL_MODIFIER_ALT | HL_MODIFIER_META | HL_MODIFIER_MOD3);
+        const auto NAVMODS     = MODS & ~(HL_MODIFIER_CAPS | HL_MODIFIER_MOD2);
+        if (COMMANDMODS != 0) {
+            stopSearchRepeat();
             return;
-
-        switch (KEYSYM) {
-            case XKB_KEY_Left:
-            case XKB_KEY_KP_Left:
-                moveSelection("left");
-                break;
-            case XKB_KEY_Right:
-            case XKB_KEY_KP_Right:
-                moveSelection("right");
-                break;
-            case XKB_KEY_Up:
-            case XKB_KEY_KP_Up:
-                moveSelection("up");
-                break;
-            case XKB_KEY_Down:
-            case XKB_KEY_KP_Down:
-                moveSelection("down");
-                break;
-            case XKB_KEY_Return:
-            case XKB_KEY_KP_Enter: closeAll(); break;
-            default: return;
         }
 
-        info.cancelled = true;
+        const auto consume = [&](ESearchRepeatAction repeat = ESearchRepeatAction::NONE, std::string text = {}) {
+            info.cancelled = true;
+            consumedSearchKeys.emplace(event.keycode);
+            if (repeat != ESearchRepeatAction::NONE)
+                armSearchRepeat(event.keycode, repeat, std::move(text));
+            else
+                stopSearchRepeat();
+        };
+
+        if (!ScrollOverview::Config::getSearchEnabled()) {
+            if (usesSubmapKeybinds && isOverviewSubmapActive())
+                return;
+
+            if (NAVMODS != 0)
+                return;
+
+            switch (KEYSYM) {
+                case XKB_KEY_Left:
+                case XKB_KEY_KP_Left:
+                    moveSelection("left");
+                    consume(ESearchRepeatAction::LEFT);
+                    return;
+                case XKB_KEY_Right:
+                case XKB_KEY_KP_Right:
+                    moveSelection("right");
+                    consume(ESearchRepeatAction::RIGHT);
+                    return;
+                case XKB_KEY_Up:
+                case XKB_KEY_KP_Up:
+                    moveSelection("up");
+                    consume(ESearchRepeatAction::UP);
+                    return;
+                case XKB_KEY_Down:
+                case XKB_KEY_KP_Down:
+                    moveSelection("down");
+                    consume(ESearchRepeatAction::DOWN);
+                    return;
+                case XKB_KEY_Return:
+                case XKB_KEY_KP_Enter:
+                    consume();
+                    closeAll();
+                    return;
+                default: return;
+            }
+        }
+
+        const bool SEARCHACTIVE = overviewSearchActive();
+        const bool NATIVECONTROLS = SEARCHACTIVE || !usesSubmapKeybinds || !isOverviewSubmapActive();
+
+        if (dragActiveWindow) {
+            if (KEYSYM == XKB_KEY_Escape && NAVMODS == 0)
+                return;
+
+            const auto TEXT = getOverviewKeyText(event);
+            if (KEYSYM == XKB_KEY_BackSpace || ScrollOverview::Search::isPrintable(TEXT))
+                consume();
+            return;
+        }
+
+        if (NAVMODS == 0) {
+            switch (KEYSYM) {
+                case XKB_KEY_BackSpace: {
+                    auto query = overviewSearchQuery();
+                    ScrollOverview::Search::eraseLastCodepoint(query);
+                    setOverviewSearchQuery(std::move(query));
+                    consume(ESearchRepeatAction::BACKSPACE);
+                    return;
+                }
+                case XKB_KEY_Escape:
+                    if (SEARCHACTIVE) {
+                        clearOverviewSearchQuery();
+                        consume();
+                    } else if (NATIVECONTROLS) {
+                        consume();
+                        closeAll();
+                    }
+                    return;
+                case XKB_KEY_Left:
+                case XKB_KEY_KP_Left:
+                    if (NATIVECONTROLS) {
+                        moveSelection("left");
+                        consume(ESearchRepeatAction::LEFT);
+                    }
+                    return;
+                case XKB_KEY_Right:
+                case XKB_KEY_KP_Right:
+                    if (NATIVECONTROLS) {
+                        moveSelection("right");
+                        consume(ESearchRepeatAction::RIGHT);
+                    }
+                    return;
+                case XKB_KEY_Up:
+                case XKB_KEY_KP_Up:
+                    if (NATIVECONTROLS) {
+                        moveSelection("up");
+                        consume(ESearchRepeatAction::UP);
+                    }
+                    return;
+                case XKB_KEY_Down:
+                case XKB_KEY_KP_Down:
+                    if (NATIVECONTROLS) {
+                        moveSelection("down");
+                        consume(ESearchRepeatAction::DOWN);
+                    }
+                    return;
+                case XKB_KEY_Return:
+                case XKB_KEY_KP_Enter:
+                    if (NATIVECONTROLS) {
+                        consume();
+                        if (!SEARCHACTIVE || (closeOnWindow && windowMatchesSearch(closeOnWindow.lock())))
+                            closeAll();
+                    }
+                    return;
+                default: break;
+            }
+        }
+
+        const auto TEXT = getOverviewKeyText(event);
+        if (!ScrollOverview::Search::isPrintable(TEXT))
+            return;
+
+        setOverviewSearchQuery(overviewSearchQuery() + TEXT);
+        consume(ESearchRepeatAction::TEXT, TEXT);
     };
 
     mouseMoveHook = Event::bus()->m_events.input.mouse.move.listen(onMouseMove);
@@ -1605,14 +1747,27 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     windowMoveHook      = Event::bus()->m_events.window.moveToWorkspace.listen(onWindowMove);
     windowActiveHook    = Event::bus()->m_events.window.active.listen(onWindowActive);
     windowFullscreenHook = Event::bus()->m_events.window.fullscreen.listen(onWindowFullscreen);
+    windowTitleHook      = Event::bus()->m_events.window.title.listen([this](PHLWINDOW window) {
+        if (closing || !overviewSearchActive())
+            return;
+        window = getOverviewWindowToShow(window);
+        if (window && window->m_monitor == pMonitor)
+            onSearchChanged();
+    });
+    windowClassHook      = Event::bus()->m_events.window.class_.listen([this](PHLWINDOW window) {
+        if (closing || !overviewSearchActive())
+            return;
+        window = getOverviewWindowToShow(window);
+        if (window && window->m_monitor == pMonitor)
+            onSearchChanged();
+    });
     workspaceCreatedHook = Event::bus()->m_events.workspace.created.listen(onWorkspaceLifecycle);
     workspaceRemovedHook = Event::bus()->m_events.workspace.removed.listen(onWorkspaceLifecycle);
     activateSubmapIfConfigured();
-    if (!usesSubmapKeybinds)
-        keyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen(onKeyboardKey);
+    keyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen(onKeyboardKey);
 
     dragKeyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen([this](IKeyboard::SKeyEvent event, Event::SCallbackInfo& info) {
-        if (closing || !dragActiveWindow || event.state != WL_KEYBOARD_KEY_STATE_PRESSED || getOverviewKeysym(event) != XKB_KEY_Escape)
+        if (info.cancelled || closing || !dragActiveWindow || event.state != WL_KEYBOARD_KEY_STATE_PRESSED || getOverviewKeysym(event) != XKB_KEY_Escape)
             return;
 
         info.cancelled = true;
@@ -1626,6 +1781,9 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     rememberSelection(Desktop::focusState()->window());
     viewportCurrentWorkspace = activeWorkspaceIndex();
     syncSelectionToViewport();
+    normalizedSearchQuery = ScrollOverview::Search::normalize(overviewSearchQuery());
+    if (overviewSearchActive())
+        reconcileSearchSelection();
 }
 
 static void renderOverviewLayerLevel(PHLMONITOR monitor, uint32_t layer, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F) {
@@ -1769,6 +1927,59 @@ void CScrollOverview::renderBackdropBlurCache(PHLMONITOR monitor) {
             .flipEndFrame = true,
         },
         fullDamage);
+}
+
+void CScrollOverview::renderSearchBar(PHLMONITOR monitor) {
+    if (!monitor || !ScrollOverview::Config::getSearchEnabled() || !overviewSearchActive())
+        return;
+
+    const auto  RESULTS      = searchResultCount();
+    const auto& QUERY        = overviewSearchQuery();
+    const auto  LABEL        = std::string{"Search: "} + QUERY + "  —  " + std::to_string(RESULTS) + (RESULTS == 1 ? " result" : " results");
+    const float SCALE        = std::max<float>(monitor->m_scale, 0.01F);
+    const float VIEWWIDTH    = sc<float>(monitor->m_transformedSize.x);
+    const int   MAXTEXTWIDTH = std::max(1, sc<int>(std::round(VIEWWIDTH * 0.65F)));
+
+    if (!searchTextTexture || searchTextCacheLabel != LABEL || std::abs(searchTextCacheScale - SCALE) > 0.001F) {
+        const auto FONT = ScrollOverview::Config::getValue<std::string>("misc:font_family");
+        searchTextTexture = g_pHyprRenderer->renderText(LABEL, CHyprColor{0.96F, 0.96F, 0.96F, 1.F}, std::max(1, sc<int>(std::round(17.F * SCALE))), false,
+                                                        FONT, MAXTEXTWIDTH, 500);
+        searchTextCacheLabel = LABEL;
+        searchTextCacheScale = SCALE;
+    }
+
+    if (!searchTextTexture || !searchTextTexture->ok())
+        return;
+
+    const float PADDINGX = 18.F * SCALE;
+    const float PADDINGY = 11.F * SCALE;
+    CBox barBox{
+        std::round((VIEWWIDTH - searchTextTexture->m_size.x - PADDINGX * 2.F) / 2.F),
+        std::round(20.F * SCALE),
+        std::round(searchTextTexture->m_size.x + PADDINGX * 2.F),
+        std::round(searchTextTexture->m_size.y + PADDINGY * 2.F),
+    };
+
+    CRectPassElement::SRectData background;
+    background.box           = barBox;
+    background.color         = CHyprColor{0.06F, 0.07F, 0.09F, 0.92F};
+    background.round         = std::max(1, sc<int>(std::round(10.F * SCALE)));
+    background.roundingPower = 2.F;
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(background));
+
+    CRectPassElement::SRectData accent;
+    accent.box           = CBox{barBox.x + PADDINGX, barBox.y + barBox.height - std::max(2.F, 2.F * SCALE), barBox.width - PADDINGX * 2.F, std::max(2.F, 2.F * SCALE)};
+    accent.color         = RESULTS == 0 ? CHyprColor{0.95F, 0.30F, 0.30F, 0.95F} : CHyprColor{0.35F, 0.70F, 1.F, 0.95F};
+    accent.round         = std::max(1, sc<int>(std::round(SCALE)));
+    accent.roundingPower = 2.F;
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(accent));
+
+    CTexPassElement::SRenderData textData;
+    textData.tex = searchTextTexture;
+    textData.box = CBox{barBox.x + PADDINGX, barBox.y + PADDINGY, searchTextTexture->m_size.x, searchTextTexture->m_size.y};
+    textData.a   = 1.F;
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(textData));
+    OverviewRender::flushPass(monitor);
 }
 
 static void focusOverviewFullscreenWindowIfActiveWorkspace(const PHLWINDOW& fullscreenWindow_, const PHLWORKSPACE& workspace, PHLMONITOR monitor) {
@@ -1943,6 +2154,170 @@ void CScrollOverview::rememberSelection(PHLWINDOW window) {
     rememberedSelection[window->m_workspace->m_id] = window;
 }
 
+bool CScrollOverview::windowMatchesSearch(const PHLWINDOW& window_) const {
+    const auto window = getOverviewWindowToShow(window_);
+    if (!window)
+        return false;
+
+    if (!overviewSearchActive())
+        return true;
+
+    return ScrollOverview::Search::matches(normalizedSearchQuery, window->m_title, window->m_class);
+}
+
+bool CScrollOverview::shouldRenderOverviewWindow(const PHLWINDOW& window) const {
+    return shouldShowOverviewWindow(window) && windowMatchesSearch(window);
+}
+
+bool CScrollOverview::shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) const {
+    return shouldShowPinnedFloatingOverviewWindow(window) && windowMatchesSearch(window);
+}
+
+size_t CScrollOverview::searchResultCount() const {
+    std::vector<PHLWINDOW> counted;
+    const auto             add = [&](const PHLWINDOW& candidate) {
+        const auto window = getOverviewWindowToShow(candidate);
+        if (!window || !windowMatchesSearch(window) || std::ranges::find(counted, window) != counted.end())
+            return;
+        counted.emplace_back(window);
+    };
+
+    for (const auto& image : images) {
+        if (!image)
+            continue;
+        for (const auto& windowRef : image->windows) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            if (shouldShowOverviewWindow(window))
+                add(window);
+        }
+    }
+
+    for (const auto& windowRef : pinnedFloatingWindows) {
+        const auto window = getOverviewWindowToShow(windowRef.lock());
+        if (shouldShowPinnedFloatingOverviewWindow(window))
+            add(window);
+    }
+
+    return counted.size();
+}
+
+void CScrollOverview::onSearchChanged() {
+    const bool WASSEARCHACTIVE = !normalizedSearchQuery.empty();
+    normalizedSearchQuery = ScrollOverview::Search::normalize(overviewSearchQuery());
+    searchTextCacheLabel.clear();
+
+    const auto selected = getOverviewWindowToShow(closeOnWindow.lock());
+    if (!WASSEARCHACTIVE && overviewSearchActive() && selected &&
+        (shouldShowOverviewWindow(selected) || shouldShowPinnedFloatingOverviewWindow(selected)))
+        searchSelectionAnchor = selected;
+
+    reconcileSearchSelection();
+    if (!overviewSearchActive())
+        searchSelectionAnchor.reset();
+    markBlurDirty();
+    damage();
+}
+
+void CScrollOverview::reconcileSearchSelection() {
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR)
+        return;
+
+    const auto isCandidate = [&](const PHLWINDOW& candidate) {
+        const auto window = getOverviewWindowToShow(candidate);
+        return window && window->m_monitor == MONITOR &&
+            (shouldRenderOverviewWindow(window) || shouldRenderPinnedOverviewWindow(window));
+    };
+
+    const auto findWorkspaceIndex = [&](const PHLWINDOW& window) {
+        if (!window)
+            return images.size();
+        for (size_t i = 0; i < images.size(); ++i) {
+            if (images[i] && images[i]->pWorkspace == window->m_workspace)
+                return i;
+        }
+        return images.size();
+    };
+
+    if (const auto anchor = getOverviewWindowToShow(searchSelectionAnchor.lock()); isCandidate(anchor)) {
+        closeOnWindow = anchor;
+        const auto idx = findWorkspaceIndex(anchor);
+        if (idx < images.size())
+            viewportCurrentWorkspace = idx;
+        rememberSelection(anchor);
+        if (activeScrollOverview().get() == this) {
+            if (anchor->m_workspace && anchor->m_workspace != MONITOR->m_activeWorkspace)
+                MONITOR->changeWorkspace(anchor->m_workspace, false, true, true);
+            syncFocusedSelection();
+        }
+        return;
+    }
+
+    if (const auto selected = getOverviewWindowToShow(closeOnWindow.lock()); isCandidate(selected)) {
+        closeOnWindow = selected;
+        return;
+    }
+
+    PHLWINDOW bestWindow;
+    size_t    bestWorkspaceIdx = images.size();
+    double    bestScore        = std::numeric_limits<double>::max();
+    const auto currentIdx      = std::min(viewportCurrentWorkspace, images.empty() ? size_t{0} : images.size() - 1);
+
+    for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        const auto& image = images[workspaceIdx];
+        if (!image || !image->pWorkspace)
+            continue;
+
+        const double workspacePenalty = std::abs(sc<double>(workspaceIdx) - sc<double>(currentIdx)) * 1'000'000'000.0;
+        const auto   offset = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
+        const auto   workspaceBox = getOverviewWorkspaceBox(MONITOR, scale->value(), viewOffset->value(), offset, layout);
+
+        for (const auto& windowRef : image->windows) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            if (!shouldRenderOverviewWindow(window))
+                continue;
+
+            auto windowBox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            if (windowBox.empty() && window->layoutTarget())
+                windowBox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            const double score = workspacePenalty + overviewBoxCenterDistanceSquared(windowBox, workspaceBox);
+            if (score >= bestScore)
+                continue;
+
+            bestWindow       = window;
+            bestWorkspaceIdx = workspaceIdx;
+            bestScore        = score;
+        }
+    }
+
+    if (!bestWindow) {
+        for (const auto& windowRef : pinnedFloatingWindows) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            if (shouldRenderPinnedOverviewWindow(window) && window->m_monitor == MONITOR) {
+                bestWindow       = window;
+                bestWorkspaceIdx = viewportCurrentWorkspace;
+                break;
+            }
+        }
+    }
+
+    if (!bestWindow) {
+        closeOnWindow.reset();
+        return;
+    }
+
+    closeOnWindow = bestWindow;
+    if (bestWorkspaceIdx < images.size())
+        viewportCurrentWorkspace = bestWorkspaceIdx;
+    rememberSelection(bestWindow);
+
+    if (activeScrollOverview().get() == this) {
+        if (bestWindow->m_workspace && bestWindow->m_workspace != MONITOR->m_activeWorkspace)
+            MONITOR->changeWorkspace(bestWindow->m_workspace, false, true, true);
+        syncFocusedSelection();
+    }
+}
+
 void CScrollOverview::updateWorkspaceOverflow() {
     const auto MONITOR = pMonitor.lock();
     if (!MONITOR)
@@ -2005,6 +2380,30 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
     if (!MONITOR)
         return nullptr;
 
+    if (overviewSearchActive()) {
+        const auto targetScale = ScrollOverview::Config::getScale();
+        const auto progress    = (1.F - targetScale) > 0.001F ? (1.F - scale->value()) / (1.F - targetScale) : 1.F;
+        for (auto it = pinnedFloatingWindows.rbegin(); it != pinnedFloatingWindows.rend(); ++it) {
+            const auto window = getOverviewWindowToShow(it->lock());
+            if (!shouldRenderPinnedOverviewWindow(window) || window->m_monitor != MONITOR)
+                continue;
+            float pinnedScale = 1.F;
+            const auto box = getPinnedFloatingOverviewWindowBox(MONITOR, window, targetScale, progress, &pinnedScale);
+            if (!box.containsPoint(point))
+                continue;
+            if (hoveredWorkspaceIdx) {
+                *hoveredWorkspaceIdx = viewportCurrentWorkspace;
+                for (size_t i = 0; i < images.size(); ++i) {
+                    if (images[i] && images[i]->pWorkspace == window->m_workspace) {
+                        *hoveredWorkspaceIdx = i;
+                        break;
+                    }
+                }
+            }
+            return window;
+        }
+    }
+
     const auto WORKSPACEPITCH = getWorkspaceRenderedPitch(MONITOR, scale->value(), layout);
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
         const auto& wimg = images[workspaceIdx];
@@ -2019,13 +2418,15 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
 
         const auto fullscreenWindow = wimg->pWorkspace ? getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(wimg->pWorkspace)) : PHLWINDOW{};
 
-        if (!isWorkspaceScrolling(wimg->pWorkspace) && shouldShowOverviewWindow(fullscreenWindow)) {
+        if (!overviewSearchActive() && !isWorkspaceScrolling(wimg->pWorkspace) && shouldShowOverviewWindow(fullscreenWindow)) {
             for (auto it = wimg->windows.rbegin(); it != wimg->windows.rend(); ++it) {
                 const auto window = getOverviewWindowToShow(it->lock());
-                if (!shouldShowOverviewWindow(window) || !window->m_isFloating)
+                if (!shouldRenderOverviewWindow(window) || !window->m_isFloating)
                     continue;
 
-                const auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                if (overviewSearchActive() && texbox.empty() && window->layoutTarget())
+                    texbox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
 
                 if (texbox.containsPoint(point))
                     return selectWindow(window);
@@ -2042,10 +2443,12 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
         for (const bool floating : {true, false}) {
             for (auto it = wimg->windows.rbegin(); it != wimg->windows.rend(); ++it) {
                 const auto window = getOverviewWindowToShow(it->lock());
-                if (!shouldShowOverviewWindow(window) || window->m_isFloating != floating)
+                if (!shouldRenderOverviewWindow(window) || window->m_isFloating != floating)
                     continue;
 
-                const auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                auto texbox = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+                if (overviewSearchActive() && texbox.empty() && window->layoutTarget())
+                    texbox = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
 
                 if (texbox.containsPoint(point))
                     return selectWindow(window);
@@ -2071,7 +2474,7 @@ PHLWINDOW CScrollOverview::windowClosestToWorkspaceCenter(size_t workspaceIdx) c
         workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, SCALE, layout));
     const auto WORKSPACEBOX = getOverviewWorkspaceBox(MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
     const auto FULLSCREENWINDOW = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(WORKSPACEIMAGE->pWorkspace));
-    const bool HASFULLSCREENPATH = !isWorkspaceScrolling(WORKSPACEIMAGE->pWorkspace) && shouldShowOverviewWindow(FULLSCREENWINDOW) &&
+    const bool HASFULLSCREENPATH = !overviewSearchActive() && !isWorkspaceScrolling(WORKSPACEIMAGE->pWorkspace) && shouldShowOverviewWindow(FULLSCREENWINDOW) &&
         FULLSCREENWINDOW->m_workspace == WORKSPACEIMAGE->pWorkspace;
 
     PHLWINDOW bestWindow;
@@ -2079,7 +2482,7 @@ PHLWINDOW CScrollOverview::windowClosestToWorkspaceCenter(size_t workspaceIdx) c
 
     for (const auto& windowRef : WORKSPACEIMAGE->windows) {
         const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowOverviewWindow(WINDOW))
+        if (!shouldRenderOverviewWindow(WINDOW))
             continue;
         if (HASFULLSCREENPATH && WINDOW != FULLSCREENWINDOW && !WINDOW->m_isFloating)
             continue;
@@ -2111,10 +2514,12 @@ PHLWINDOW CScrollOverview::windowAtOverviewCursorOnWorkspace(size_t workspaceIdx
     for (const bool floating : {true, false}) {
         for (auto it = images[workspaceIdx]->windows.rbegin(); it != images[workspaceIdx]->windows.rend(); ++it) {
             const auto WINDOW = getOverviewWindowToShow(it->lock());
-            if (!shouldShowOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating != floating)
+            if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating != floating)
                 continue;
 
-            const auto box    = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
+            auto       box    = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
+            if (overviewSearchActive() && box.empty() && WINDOW->layoutTarget())
+                box = getOverviewGlobalBox(WINDOW->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), WORKSPACE_OFFSET, layout);
             const auto hitbox = expandOverviewWindowHitbox(box, scale->value(), MONITOR->m_scale);
             if (box.containsPoint(lastMousePosLocal)) {
                 if (windowBox)
@@ -2266,7 +2671,7 @@ CDropIndicator::SDropAnchor CScrollOverview::dropAnchorAtOverviewCursorOnWorkspa
     float bestDistanceSq = std::numeric_limits<float>::max();
     for (auto it = IMAGE->windows.rbegin(); it != IMAGE->windows.rend(); ++it) {
         const auto WINDOW = getOverviewWindowToShow(it->lock());
-        if (!shouldShowOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
+        if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
             continue;
 
         const auto [BOX, LOGICALBOX] = boxesForWindow(WINDOW);
@@ -2297,7 +2702,7 @@ CDropIndicator::SDropAnchor CScrollOverview::dropAnchorAtOverviewCursorOnWorkspa
 
     for (const auto& windowRef : IMAGE->windows) {
         const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
+        if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
             continue;
 
         const auto [BOX, LOGICALBOX] = boxesForWindow(WINDOW);
@@ -2317,7 +2722,7 @@ CDropIndicator::SDropAnchor CScrollOverview::dropAnchorAtOverviewCursorOnWorkspa
 
     for (const auto& windowRef : IMAGE->windows) {
         const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
+        if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == ignoredWindow || WINDOW->m_isFloating)
             continue;
 
         const auto [BOX, LOGICALBOX] = boxesForWindow(WINDOW);
@@ -2381,7 +2786,7 @@ PHLWORKSPACE CScrollOverview::workspaceAtOverviewDropPoint(const Vector2D& point
         for (const bool floating : {true, false}) {
             for (auto it = wimg->windows.rbegin(); it != wimg->windows.rend(); ++it) {
                 const auto WINDOW = getOverviewWindowToShow(it->lock());
-                if (!shouldShowOverviewWindow(WINDOW) || WINDOW == draggedWindow || WINDOW->m_isFloating != floating)
+                if (!shouldRenderOverviewWindow(WINDOW) || WINDOW == draggedWindow || WINDOW->m_isFloating != floating)
                     continue;
 
                 const auto WINDOWBOX = getOverviewDragWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
@@ -2434,7 +2839,7 @@ static void syncWorkspaceGeometry(const PHLWORKSPACE& workspace) {
 }
 
 bool CScrollOverview::selectOverviewWindow(PHLWINDOW window, size_t workspaceIdx, bool syncFocus) {
-    if (!window)
+    if (!window || (overviewSearchActive() && !shouldRenderOverviewWindow(window) && !shouldRenderPinnedOverviewWindow(window)))
         return false;
 
     closeOnWindow            = window;
@@ -3007,7 +3412,7 @@ void CScrollOverview::focusMostVisibleScrollingWindow(const PHLWORKSPACE& worksp
         WORKSPACEBOX.translate(MONITOR->m_position);
 
     const auto preferredWindow = getOverviewWindowToShow(scrollingPanInitialWindow.lock());
-    if (shouldShowOverviewWindow(preferredWindow) && preferredWindow->m_workspace == workspace && !preferredWindow->m_isFloating && preferredWindow->layoutTarget()) {
+    if (shouldRenderOverviewWindow(preferredWindow) && preferredWindow->m_workspace == workspace && !preferredWindow->m_isFloating && preferredWindow->layoutTarget()) {
         const auto WINDOWBOX   = preferredWindow->layoutTarget()->position();
         const auto AREA        = overviewBoxArea(WINDOWBOX);
         const auto VISIBLEAREA = overviewBoxIntersectionArea(WINDOWBOX, WORKSPACEBOX);
@@ -3021,7 +3426,7 @@ void CScrollOverview::focusMostVisibleScrollingWindow(const PHLWORKSPACE& worksp
 
     for (const auto& windowRef : Desktop::windowState()->windows()) {
         const auto WINDOW = getOverviewWindowToShow(windowRef);
-        if (!shouldShowOverviewWindow(WINDOW) || WINDOW->m_workspace != workspace || WINDOW->m_isFloating || !WINDOW->layoutTarget())
+        if (!shouldRenderOverviewWindow(WINDOW) || WINDOW->m_workspace != workspace || WINDOW->m_isFloating || !WINDOW->layoutTarget())
             continue;
 
         const auto WINDOWBOX = WINDOW->layoutTarget()->position();
@@ -3070,7 +3475,7 @@ bool CScrollOverview::moveScrollingColumnSelection(bool next) {
     if (!ALGO || !ALGO->m_scrollingData || ALGO->m_scrollingData->columns.empty())
         return false;
 
-    if (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldShowOverviewWindow(closeOnWindow.lock()) || closeOnWindow->m_isFloating)
+    if (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldRenderOverviewWindow(closeOnWindow.lock()) || closeOnWindow->m_isFloating)
         syncSelectionToViewport();
 
     const auto CURRENT = getOverviewWindowToShow(closeOnWindow.lock());
@@ -3089,7 +3494,7 @@ bool CScrollOverview::moveScrollingColumnSelection(bool next) {
 
             for (const auto& windowRef : WORKSPACEIMAGE->windows) {
                 const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
-                if (shouldShowOverviewWindow(WINDOW) && !WINDOW->m_isFloating && WINDOW->layoutTarget() == targetData->target && WINDOW->m_workspace == WORKSPACEIMAGE->pWorkspace)
+                if (shouldRenderOverviewWindow(WINDOW) && !WINDOW->m_isFloating && WINDOW->layoutTarget() == targetData->target && WINDOW->m_workspace == WORKSPACEIMAGE->pWorkspace)
                     return WINDOW;
             }
         }
@@ -3152,7 +3557,7 @@ bool CScrollOverview::moveScrollingStackSelection(bool next) {
     if (!ALGO || !ALGO->m_scrollingData || ALGO->m_scrollingData->columns.empty())
         return false;
 
-    if (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldShowOverviewWindow(closeOnWindow.lock()) || closeOnWindow->m_isFloating)
+    if (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldRenderOverviewWindow(closeOnWindow.lock()) || closeOnWindow->m_isFloating)
         syncSelectionToViewport();
 
     const auto CURRENT = getOverviewWindowToShow(closeOnWindow.lock());
@@ -3175,7 +3580,7 @@ bool CScrollOverview::moveScrollingStackSelection(bool next) {
 
     for (const auto& windowRef : WORKSPACEIMAGE->windows) {
         const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
-        if (shouldShowOverviewWindow(WINDOW) && !WINDOW->m_isFloating && WINDOW->layoutTarget() == TARGETDATA->target && WINDOW->m_workspace == WORKSPACEIMAGE->pWorkspace) {
+        if (shouldRenderOverviewWindow(WINDOW) && !WINDOW->m_isFloating && WINDOW->layoutTarget() == TARGETDATA->target && WINDOW->m_workspace == WORKSPACEIMAGE->pWorkspace) {
             closeOnWindow = WINDOW;
             rememberSelection(WINDOW);
             syncFocusedSelection();
@@ -3443,7 +3848,7 @@ void CScrollOverview::moveViewportWorkspace(bool up) {
 
     if (const auto it = rememberedSelection.find(TARGETWORKSPACEIMAGE->pWorkspace->m_id); it != rememberedSelection.end()) {
         const auto rememberedWindow = getOverviewWindowToShow(it->second.lock());
-        if (rememberedWindow && rememberedWindow->m_workspace == TARGETWORKSPACEIMAGE->pWorkspace && shouldShowOverviewWindow(rememberedWindow))
+        if (rememberedWindow && rememberedWindow->m_workspace == TARGETWORKSPACEIMAGE->pWorkspace && shouldRenderOverviewWindow(rememberedWindow))
             closeOnWindow = rememberedWindow;
     }
 
@@ -3603,7 +4008,7 @@ void CScrollOverview::syncSelectionToViewport() {
     if (closeOnWindow && closeOnWindow->m_workspace == WSPACE->pWorkspace) {
         const auto selectedWindow = getOverviewWindowToShow(closeOnWindow.lock());
         for (const auto& windowRef : WSPACE->windows) {
-            if (getOverviewWindowToShow(windowRef.lock()) == selectedWindow) {
+            if (getOverviewWindowToShow(windowRef.lock()) == selectedWindow && shouldRenderOverviewWindow(selectedWindow)) {
                 closeOnWindow = selectedWindow;
                 rememberSelection(selectedWindow);
                 syncFocusedSelection();
@@ -3614,7 +4019,7 @@ void CScrollOverview::syncSelectionToViewport() {
 
     if (const auto it = rememberedSelection.find(WSPACE->pWorkspace->m_id); it != rememberedSelection.end()) {
         const auto rememberedWindow = getOverviewWindowToShow(it->second.lock());
-        if (rememberedWindow && rememberedWindow->m_workspace == WSPACE->pWorkspace && shouldShowOverviewWindow(rememberedWindow)) {
+        if (rememberedWindow && rememberedWindow->m_workspace == WSPACE->pWorkspace && shouldRenderOverviewWindow(rememberedWindow)) {
             for (const auto& windowRef : WSPACE->windows) {
                 if (getOverviewWindowToShow(windowRef.lock()) == rememberedWindow) {
                     closeOnWindow = rememberedWindow;
@@ -3626,7 +4031,7 @@ void CScrollOverview::syncSelectionToViewport() {
     }
 
     const auto focusedWindow = Desktop::focusState()->window();
-    if (shouldShowOverviewWindow(focusedWindow) && focusedWindow->m_workspace == WSPACE->pWorkspace) {
+    if (shouldRenderOverviewWindow(focusedWindow) && focusedWindow->m_workspace == WSPACE->pWorkspace) {
         closeOnWindow = focusedWindow;
         rememberSelection(focusedWindow);
         syncFocusedSelection();
@@ -3647,7 +4052,9 @@ void CScrollOverview::syncSelectionToViewport() {
 
 void CScrollOverview::syncFocusedSelection() {
     const auto window = getOverviewWindowToShow(closeOnWindow.lock());
-    if (!shouldShowOverviewWindow(window))
+    if (!shouldShowOverviewWindow(window) && !shouldShowPinnedFloatingOverviewWindow(window))
+        return;
+    if (overviewSearchActive() && !windowMatchesSearch(window))
         return;
 
     closeOnWindow = window;
@@ -3681,7 +4088,147 @@ size_t CScrollOverview::dragWorkspaceIndex(PHLWINDOW window) const {
     return images.size();
 }
 
+bool CScrollOverview::moveSearchSelection(const std::string& direction) {
+    const bool MOVINGLEFT  = direction == "left";
+    const bool MOVINGRIGHT = direction == "right";
+    const bool MOVINGUP    = direction == "up";
+    const bool MOVINGDOWN  = direction == "down";
+    if (!MOVINGLEFT && !MOVINGRIGHT && !MOVINGUP && !MOVINGDOWN)
+        return false;
+
+    const auto MONITOR = pMonitor.lock();
+    if (!MONITOR)
+        return false;
+
+    reconcileSearchSelection();
+    const auto CURRENT = getOverviewWindowToShow(closeOnWindow.lock());
+    if (!CURRENT)
+        return false;
+
+    struct SCandidate {
+        PHLWINDOW window;
+        size_t    workspaceIdx = 0;
+        CBox      box;
+        bool      pinned = false;
+    };
+
+    std::vector<SCandidate> candidates;
+    std::vector<PHLWINDOW>  added;
+    const auto              ACTIVEIDX = activeWorkspaceIndex();
+    const auto              PITCH     = getWorkspaceRenderedPitch(MONITOR, scale->value(), layout);
+
+    for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        const auto& image = images[workspaceIdx];
+        if (!image)
+            continue;
+        const auto offset = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
+        for (const auto& windowRef : image->windows) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            if (!shouldRenderOverviewWindow(window) || std::ranges::find(added, window) != added.end())
+                continue;
+            auto box = getOverviewWindowBox(window, MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            if (box.empty() && window->layoutTarget())
+                box = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, scale->value(), viewOffset->value(), offset, layout);
+            if (box.empty())
+                continue;
+            added.emplace_back(window);
+            candidates.push_back({window, workspaceIdx, box, false});
+        }
+    }
+
+    const auto TARGETSCALE = ScrollOverview::Config::getScale();
+    const auto PROGRESS    = (1.F - TARGETSCALE) > 0.001F ? (1.F - scale->value()) / (1.F - TARGETSCALE) : 1.F;
+    for (const auto& windowRef : pinnedFloatingWindows) {
+        const auto window = getOverviewWindowToShow(windowRef.lock());
+        if (!shouldRenderPinnedOverviewWindow(window) || window->m_monitor != MONITOR || std::ranges::find(added, window) != added.end())
+            continue;
+        float pinnedScale = 1.F;
+        auto  box         = getPinnedFloatingOverviewWindowBox(MONITOR, window, TARGETSCALE, PROGRESS, &pinnedScale);
+        if (box.empty())
+            continue;
+        added.emplace_back(window);
+        candidates.push_back({window, std::min(viewportCurrentWorkspace, images.empty() ? size_t{0} : images.size() - 1), box, true});
+    }
+
+    const auto currentIt = std::ranges::find_if(candidates, [&CURRENT](const auto& candidate) { return candidate.window == CURRENT; });
+    if (currentIt == candidates.end())
+        return false;
+
+    const bool MOVINGOVERVIEWAXIS = layout == ScrollOverview::Config::ELayout::HORIZONTAL ? MOVINGLEFT || MOVINGRIGHT : MOVINGUP || MOVINGDOWN;
+    const auto CURRENTCENTER      = currentIt->box.middle();
+
+    const SCandidate* bestCandidate       = nullptr;
+    float             bestPrimaryDistance = std::numeric_limits<float>::max();
+    float             bestSecondaryDistance = std::numeric_limits<float>::max();
+    float             bestOverlap         = -1.F;
+    bool              bestHasOverlap      = false;
+
+    for (const auto& candidate : candidates) {
+        if (candidate.window == CURRENT)
+            continue;
+        if (!candidate.pinned && !currentIt->pinned && candidate.workspaceIdx != currentIt->workspaceIdx && !MOVINGOVERVIEWAXIS)
+            continue;
+
+        const auto center = candidate.box.middle();
+        const float primaryDistance = MOVINGRIGHT ? center.x - CURRENTCENTER.x : MOVINGLEFT ? CURRENTCENTER.x - center.x :
+            MOVINGDOWN ? center.y - CURRENTCENTER.y : CURRENTCENTER.y - center.y;
+        if (primaryDistance <= 0.F)
+            continue;
+
+        const float overlap = MOVINGLEFT || MOVINGRIGHT ?
+            sc<float>(std::max(0.0, std::min(currentIt->box.y + currentIt->box.height, candidate.box.y + candidate.box.height) - std::max(currentIt->box.y, candidate.box.y))) :
+            sc<float>(std::max(0.0, std::min(currentIt->box.x + currentIt->box.width, candidate.box.x + candidate.box.width) - std::max(currentIt->box.x, candidate.box.x)));
+        const bool  hasOverlap = overlap > 0.F;
+        const float secondaryDistance = MOVINGLEFT || MOVINGRIGHT ? std::abs(center.y - CURRENTCENTER.y) : std::abs(center.x - CURRENTCENTER.x);
+
+        const bool SAMEWORKSPACE = !candidate.pinned && !currentIt->pinned && candidate.workspaceIdx == currentIt->workspaceIdx;
+        if ((MOVINGUP || MOVINGDOWN) && !hasOverlap && SAMEWORKSPACE)
+            continue;
+
+        const bool better = !bestCandidate || (hasOverlap != bestHasOverlap ? hasOverlap :
+            primaryDistance < bestPrimaryDistance - 0.5F ||
+            (std::abs(primaryDistance - bestPrimaryDistance) <= 0.5F &&
+             ((hasOverlap && overlap > bestOverlap + 0.5F) || (!hasOverlap && secondaryDistance < bestSecondaryDistance - 0.5F))));
+        if (!better)
+            continue;
+
+        bestCandidate          = &candidate;
+        bestPrimaryDistance    = primaryDistance;
+        bestSecondaryDistance  = secondaryDistance;
+        bestOverlap            = overlap;
+        bestHasOverlap         = hasOverlap;
+    }
+
+    if (!bestCandidate)
+        return false;
+
+    closeOnWindow         = bestCandidate->window;
+    searchSelectionAnchor = bestCandidate->window;
+    if (!bestCandidate->pinned && bestCandidate->workspaceIdx < images.size())
+        viewportCurrentWorkspace = bestCandidate->workspaceIdx;
+    rememberSelection(bestCandidate->window);
+
+    if (bestCandidate->window->m_workspace && bestCandidate->window->m_workspace != MONITOR->m_activeWorkspace)
+        MONITOR->changeWorkspace(bestCandidate->window->m_workspace, false, true, true);
+
+    if (const auto ALGO = overviewScrollingAlgorithmForWorkspace(bestCandidate->window->m_workspace); ALGO && bestCandidate->window->layoutTarget()) {
+        const auto data = ALGO->dataFor(bestCandidate->window->layoutTarget());
+        const auto col  = data ? data->column.lock() : nullptr;
+        if (col) {
+            ALGO->m_scrollingData->centerOrFitCol(col);
+            ALGO->m_scrollingData->recalculate();
+        }
+    }
+
+    syncFocusedSelection();
+    damage();
+    return true;
+}
+
 bool CScrollOverview::moveSelection(const std::string& direction) {
+    if (overviewSearchActive())
+        return moveSearchSelection(direction);
+
     const bool MOVINGLEFT  = direction == "left";
     const bool MOVINGRIGHT = direction == "right";
     const bool MOVINGUP    = direction == "up";
@@ -4111,8 +4658,6 @@ void CScrollOverview::transferSharedStateOwnership() {
     successor->usesSubmapKeybinds   = usesSubmapKeybinds;
     successor->submapActive         = submapActive;
     successor->previousSubmapName   = std::move(previousSubmapName);
-    if (successor->usesSubmapKeybinds)
-        successor->keyboardKeyHook.reset();
     usesSubmapKeybinds = false;
     submapActive       = false;
     sharedStateOwner   = false;
@@ -4223,12 +4768,14 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
     });
 
     const auto renderOverviewWindow = [&](const PHLWINDOW& window) {
-        if (!shouldShowOverviewWindow(window))
+        if (!shouldRenderOverviewWindow(window))
             return;
         if (dragActiveWindow && window == getOverviewWindowToShow(dragActiveWindow.lock()))
             return;
 
-        const auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
+        auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
+        if (overviewSearchActive() && windowBox.empty() && window->layoutTarget())
+            windowBox = getOverviewGlobalBox(window->layoutTarget()->position(), monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
         if (!overviewBoxIntersectsMonitor(windowBox, monitor))
             return;
 
@@ -4237,7 +4784,7 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
 
     const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
     const bool scrollingLayout   = isWorkspaceScrolling(workspace);
-    const bool hasFullscreenPath = shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace;
+    const bool hasFullscreenPath = !overviewSearchActive() && shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace;
     const auto renderDropIndicator = [&] {
         if (hasRunningWorkspaceAnimation())
             return;
@@ -4275,7 +4822,7 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
         OverviewRender::flushPass(monitor);
         for (const auto& windowRef : workspaceImage->windows) {
             const auto window = getOverviewWindowToShow(windowRef.lock());
-            if (!shouldShowOverviewWindow(window) || !window->m_isFloating || window == fullscreenWindow)
+            if (!shouldRenderOverviewWindow(window) || !window->m_isFloating || window == fullscreenWindow)
                 continue;
 
             renderOverviewWindow(window);
@@ -4338,7 +4885,7 @@ bool CScrollOverview::hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t
         const auto workspace = workspaceImage->pWorkspace;
 
         const auto isVisiblePrecomputedBlurWindow = [&](const PHLWINDOW& window) {
-            if (window == DRAGGEDWINDOW || !OverviewWindow::shouldUseBlurFramebuffer(window))
+            if (!shouldRenderOverviewWindow(window) || window == DRAGGEDWINDOW || !OverviewWindow::shouldUseBlurFramebuffer(window))
                 return false;
 
             const auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
@@ -4347,7 +4894,7 @@ bool CScrollOverview::hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t
 
         if (!isWorkspaceScrolling(workspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
-            if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
+            if (!overviewSearchActive() && shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
                 if (isVisiblePrecomputedBlurWindow(fullscreenWindow))
                     return true;
 
@@ -4373,7 +4920,7 @@ void CScrollOverview::renderPinnedFloatingWindows(PHLMONITOR monitor, float over
 
     for (const auto& windowRef : pinnedFloatingWindows) {
         const auto window = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowPinnedFloatingOverviewWindow(window))
+        if (!shouldRenderPinnedOverviewWindow(window))
             continue;
         if (dragActiveWindow && window == getOverviewWindowToShow(dragActiveWindow.lock()))
             continue;
@@ -4533,7 +5080,7 @@ void CScrollOverview::onDamageReported() {
 
 bool CScrollOverview::isVisibleRealtimePreviewWindow(const PHLWINDOW& window) const {
     const auto MONITOR = pMonitor.lock();
-    if (!MONITOR || !window || !Fullscreen::controller()->isFullscreen(window) || window->m_monitor != MONITOR)
+    if (!MONITOR || !window || !shouldRenderOverviewWindow(window) || !Fullscreen::controller()->isFullscreen(window) || window->m_monitor != MONITOR)
         return false;
 
     const auto ACTIVEIDX = activeWorkspaceIndex();
@@ -4635,6 +5182,67 @@ int CScrollOverview::realtimePreviewTimerCallback(void* data) {
     return 0;
 }
 
+void CScrollOverview::runSearchRepeatAction() {
+    if (closing || activeScrollOverview().get() != this)
+        return;
+
+    switch (searchRepeatAction) {
+        case ESearchRepeatAction::TEXT:
+            if (!searchRepeatText.empty())
+                setOverviewSearchQuery(overviewSearchQuery() + searchRepeatText);
+            break;
+        case ESearchRepeatAction::BACKSPACE: {
+            auto query = overviewSearchQuery();
+            ScrollOverview::Search::eraseLastCodepoint(query);
+            setOverviewSearchQuery(std::move(query));
+            break;
+        }
+        case ESearchRepeatAction::LEFT: moveSelection("left"); break;
+        case ESearchRepeatAction::RIGHT: moveSelection("right"); break;
+        case ESearchRepeatAction::UP: moveSelection("up"); break;
+        case ESearchRepeatAction::DOWN: moveSelection("down"); break;
+        case ESearchRepeatAction::NONE: break;
+    }
+}
+
+void CScrollOverview::armSearchRepeat(uint32_t keycode, ESearchRepeatAction action, std::string text) {
+    stopSearchRepeat();
+
+    const auto keyboard = g_pSeatManager->m_keyboard.lock();
+    if (!searchRepeatTimer || !keyboard || keyboard->m_repeatRate <= 0 || action == ESearchRepeatAction::NONE)
+        return;
+
+    searchRepeatKeycode = keycode;
+    searchRepeatAction  = action;
+    searchRepeatText    = std::move(text);
+    wl_event_source_timer_update(searchRepeatTimer, std::max(1, keyboard->m_repeatDelay));
+}
+
+void CScrollOverview::stopSearchRepeat() {
+    searchRepeatKeycode = 0;
+    searchRepeatAction  = ESearchRepeatAction::NONE;
+    searchRepeatText.clear();
+    if (searchRepeatTimer)
+        wl_event_source_timer_update(searchRepeatTimer, 0);
+}
+
+int CScrollOverview::searchRepeatTimerCallback(void* data) {
+    const auto overview = sc<CScrollOverview*>(data);
+    if (!overview || overview->searchRepeatAction == ESearchRepeatAction::NONE)
+        return 0;
+
+    overview->runSearchRepeatAction();
+
+    const auto keyboard = g_pSeatManager->m_keyboard.lock();
+    if (!keyboard || keyboard->m_repeatRate <= 0 || overview->searchRepeatAction == ESearchRepeatAction::NONE) {
+        overview->stopSearchRepeat();
+        return 0;
+    }
+
+    wl_event_source_timer_update(overview->searchRepeatTimer, std::max(1, 1000 / keyboard->m_repeatRate));
+    return 0;
+}
+
 bool CScrollOverview::hasRunningWorkspaceAnimation() const {
     return viewOffset->isBeingAnimated() || workspaceInsertProgress->isBeingAnimated() || workspaceInsertFadeProgress->isBeingAnimated();
 }
@@ -4653,16 +5261,18 @@ bool CScrollOverview::shouldSuppressRenderDamage() const {
     const auto DRAGGED   = getOverviewWindowToShow(dragActiveWindow.lock());
 
     const auto isVisibleAnimatedWindow = [&](const PHLWINDOW& window, float workspaceOffset) {
-        if (!shouldShowOverviewWindow(window) || window == DRAGGED)
+        if (!shouldRenderOverviewWindow(window) || window == DRAGGED)
             return false;
 
-        const auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+        auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
+            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
         return overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR) && windowHasOverviewAnimation(window);
     };
 
     for (const auto& windowRef : pinnedFloatingWindows) {
         const auto window = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowPinnedFloatingOverviewWindow(window) || window->m_monitor != MONITOR)
+        if (!shouldRenderPinnedOverviewWindow(window) || window->m_monitor != MONITOR)
             continue;
 
         if (windowHasOverviewAnimation(window))
@@ -4681,7 +5291,7 @@ bool CScrollOverview::shouldSuppressRenderDamage() const {
             continue;
 
         const auto workspace = workspaceImage->pWorkspace;
-        if (!isWorkspaceScrolling(workspace)) {
+        if (!overviewSearchActive() && !isWorkspaceScrolling(workspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
             if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
                 if (isVisibleAnimatedWindow(fullscreenWindow, WORKSPACEOFFSET))
@@ -4731,12 +5341,14 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
     auto resetSendingFrameCallbacks      = Hyprutils::Utils::CScopeGuard([this, PREVSENDINGFRAMECALLBACKS] { sendingOverviewFrameCallbacks = PREVSENDINGFRAMECALLBACKS; });
 
     const auto frameWindow = [&](const PHLWINDOW& window, float workspaceOffset, bool realtime) {
-        if (!shouldShowOverviewWindow(window))
+        if (!shouldRenderOverviewWindow(window))
             return;
 
         const bool ISDRAGGED = window == DRAGGED;
         if (!ISDRAGGED) {
-            const auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+            auto WINDOWBOX = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
+            if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
+                WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), workspaceOffset, layout);
             if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
                 return;
         }
@@ -4753,7 +5365,7 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
 
     for (const auto& windowRef : pinnedFloatingWindows) {
         const auto window = getOverviewWindowToShow(windowRef.lock());
-        if (!shouldShowPinnedFloatingOverviewWindow(window) || window->m_monitor != MONITOR)
+        if (!shouldRenderPinnedOverviewWindow(window) || window->m_monitor != MONITOR)
             continue;
 
         if (!CANFRAMETHROTTLEDWINDOWS) {
@@ -4778,7 +5390,7 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
 
         const auto workspace = workspaceImage->pWorkspace;
         const bool REALTIME  = isSelectedWorkspace(workspace);
-        if (!isWorkspaceScrolling(workspace)) {
+        if (!overviewSearchActive() && !isWorkspaceScrolling(workspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspace));
             if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspace) {
                 frameWindow(fullscreenWindow, WORKSPACEOFFSET, REALTIME);
@@ -4848,6 +5460,8 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
         return true;
 
     if (shouldShowPinnedFloatingOverviewWindow(window)) {
+        if (!shouldRenderPinnedOverviewWindow(window))
+            return false;
         if (sendingOverviewFrameCallbacks)
             return true;
 
@@ -4857,6 +5471,8 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
 
     if (!shouldShowOverviewWindow(window) || !window->m_workspace)
         return true;
+    if (!shouldRenderOverviewWindow(window))
+        return false;
 
     const auto ACTIVEIDX = activeWorkspaceIndex();
     const auto SCALE     = scale->value();
@@ -4867,14 +5483,16 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
         if (!workspaceImage || workspaceImage->pWorkspace != window->m_workspace)
             continue;
 
-        if (!isWorkspaceScrolling(workspaceImage->pWorkspace)) {
+        if (!overviewSearchActive() && !isWorkspaceScrolling(workspaceImage->pWorkspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspaceImage->pWorkspace));
             if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspaceImage->pWorkspace && fullscreenWindow != window && !window->m_isFloating)
                 return false;
         }
 
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        const auto WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        auto       WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
+            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
         if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
             return false;
 
@@ -4944,6 +5562,8 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
     if (shouldShowPinnedFloatingOverviewWindow(window)) {
         if (window->m_monitor != MONITOR)
             return true;
+        if (!shouldRenderPinnedOverviewWindow(window))
+            return false;
 
         if (!realtimePreviewFrameQueued && shouldAllowRealtimePreviewFrame())
             return true;
@@ -4957,6 +5577,8 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
 
     if (!shouldShowOverviewWindow(window) || !window->m_workspace)
         return false;
+    if (!shouldRenderOverviewWindow(window))
+        return false;
 
     const auto ACTIVEIDX = activeWorkspaceIndex();
     const auto SCALE     = scale->value();
@@ -4967,14 +5589,16 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         if (!workspaceImage || workspaceImage->pWorkspace != window->m_workspace)
             continue;
 
-        if (!isWorkspaceScrolling(workspaceImage->pWorkspace)) {
+        if (!overviewSearchActive() && !isWorkspaceScrolling(workspaceImage->pWorkspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspaceImage->pWorkspace));
             if (shouldShowOverviewWindow(fullscreenWindow) && fullscreenWindow->m_workspace == workspaceImage->pWorkspace && fullscreenWindow != window && !window->m_isFloating)
                 return false;
         }
 
         const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, ACTIVEIDX, PITCH);
-        const auto WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        auto       WINDOWBOX        = getOverviewWindowBox(window, MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
+        if (overviewSearchActive() && WINDOWBOX.empty() && window->layoutTarget())
+            WINDOWBOX = getOverviewGlobalBox(window->layoutTarget()->position(), MONITOR, SCALE, viewOffset->value(), WORKSPACEOFFSET, layout);
         if (!overviewBoxIntersectsMonitor(WINDOWBOX, MONITOR))
             return false;
 
@@ -5198,7 +5822,10 @@ void CScrollOverview::onPreRender() {
         rebuildPending = false;
         markBlurDirty();
         redrawAll();
-        syncSelectionToViewport();
+        if (overviewSearchActive())
+            reconcileSearchSelection();
+        else
+            syncSelectionToViewport();
         damage();
         return;
     }
@@ -5294,7 +5921,10 @@ void CScrollOverview::onWorkspaceChange() {
         *viewOffset = Vector2D{};
     }
 
-    syncSelectionToViewport();
+    if (overviewSearchActive())
+        reconcileSearchSelection();
+    else
+        syncSelectionToViewport();
     markBlurDirty();
     damage();
 }
@@ -5383,6 +6013,8 @@ void CScrollOverview::render() {
         }
     }
 
+    renderSearchBar(MONITOR);
+
     sendOverviewFrameCallbacks(NOW);
 }
 
@@ -5401,6 +6033,7 @@ static Vector2D hyprlerp(const Vector2D& from, const Vector2D& to, const float p
 void CScrollOverview::setClosing(bool closing_) {
     closing = closing_;
     if (closing) {
+        stopSearchRepeat();
         removeFromCrossMonitorDragSession(this);
         cancelWindowDrag();
         transferSharedStateOwnership();
@@ -5414,6 +6047,7 @@ void CScrollOverview::setClosing(bool closing_) {
 }
 
 void CScrollOverview::releaseInputListeners() {
+    stopSearchRepeat();
     if (scrollingPanPointerDown)
         endScrollingPan();
     releaseTopLayerPointerButtons(Time::millis(Time::steadyNow()));
@@ -5429,6 +6063,8 @@ void CScrollOverview::releaseInputListeners() {
     touchDownHook.reset();
     keyboardKeyHook.reset();
     dragKeyboardKeyHook.reset();
+    windowTitleHook.reset();
+    windowClassHook.reset();
 }
 
 void CScrollOverview::activateSubmapIfConfigured() {

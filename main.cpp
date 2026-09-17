@@ -659,7 +659,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             overview->onPreRender();
     });
 
-    g_configReloadHook = Event::bus()->m_events.config.reloaded.listen([] { reconcileNativeDragHook(); });
+    g_configReloadHook = Event::bus()->m_events.config.reloaded.listen([] {
+        if (!ScrollOverview::Config::getSearchEnabled())
+            clearOverviewSearchQuery();
+        reconcileNativeDragHook();
+    });
 
     ScrollOverview::Config::registerDispatcher("overview", ::onOverviewDispatcher);
     ScrollOverview::Config::registerDispatcher("navigate", ::onNavigateDispatcher);

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Config.hpp"
@@ -22,6 +23,9 @@
 
 class CMonitor;
 struct wl_event_source;
+namespace Render {
+    class ITexture;
+}
 
 class CScrollOverview : public IOverview {
   public:
@@ -54,6 +58,8 @@ class CScrollOverview : public IOverview {
     void         selectHoveredWorkspace() override;
     bool         moveSelection(const std::string& direction) override;
     bool         windowDispatcherAction(const std::string& action) override;
+    void         onSearchChanged() override;
+    size_t       searchResultCount() const override;
 
     void         fullRender() override;
     bool         adoptNativeWindowDrag(PHLWINDOW expectedWindow = {});
@@ -62,6 +68,16 @@ class CScrollOverview : public IOverview {
     enum class ECloseMode {
         COMMIT_SELECTION,
         PRESERVE_MONITOR_STATE,
+    };
+
+    enum class ESearchRepeatAction {
+        NONE,
+        TEXT,
+        BACKSPACE,
+        LEFT,
+        RIGHT,
+        UP,
+        DOWN,
     };
 
     struct SWindowDragSnapshot {
@@ -77,6 +93,15 @@ class CScrollOverview : public IOverview {
     };
 
     void       close(ECloseMode mode);
+    bool       windowMatchesSearch(const PHLWINDOW& window) const;
+    bool       shouldRenderOverviewWindow(const PHLWINDOW& window) const;
+    bool       shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) const;
+    void       reconcileSearchSelection();
+    bool       moveSearchSelection(const std::string& direction);
+    void       renderSearchBar(PHLMONITOR monitor);
+    void       runSearchRepeatAction();
+    void       armSearchRepeat(uint32_t keycode, ESearchRepeatAction action, std::string text = {});
+    void       stopSearchRepeat();
     void   rebuildWorkspaceImages();
     void   seedRememberedSelections();
     void   redrawAll(bool forcelowres = false);
@@ -172,6 +197,7 @@ class CScrollOverview : public IOverview {
     void   restoreSubmapIfActive();
     bool   dispatchSubmapMouseClick(uint32_t button);
     static int realtimePreviewTimerCallback(void* data);
+    static int searchRepeatTimerCallback(void* data);
 
     size_t viewportCurrentWorkspace = 0;
     bool   rebuildPending           = false;
@@ -204,6 +230,7 @@ class CScrollOverview : public IOverview {
     Vector2D                         lastMousePosLocal = Vector2D{}; // monitor-local pixel space
 
     PHLWINDOWREF                     closeOnWindow;
+    PHLWINDOWREF                     searchSelectionAnchor;
     PHLWINDOWREF                     dragActiveWindow;
     PHLWORKSPACEREF                  dragOriginalWorkspace;
     std::vector<WP<IOverview>>                    dragTransientOverviews;
@@ -298,6 +325,15 @@ class CScrollOverview : public IOverview {
     Time::steady_tp                  lastRealtimePreviewFrame = {};
     Time::steady_tp                  realtimePreviewTimerDue = {};
     wl_event_source*                 realtimePreviewTimer = nullptr;
+    wl_event_source*                 searchRepeatTimer = nullptr;
+    uint32_t                         searchRepeatKeycode = 0;
+    ESearchRepeatAction              searchRepeatAction = ESearchRepeatAction::NONE;
+    std::string                      searchRepeatText;
+    std::unordered_set<uint32_t>     consumedSearchKeys;
+    std::string                      normalizedSearchQuery;
+    std::string                      searchTextCacheLabel;
+    float                            searchTextCacheScale = 0.F;
+    SP<Render::ITexture>             searchTextTexture;
 
     bool                             closing = false;
     bool                             closeApplied = false; // close() has run its teardown; guards against double-invocation
@@ -313,6 +349,8 @@ class CScrollOverview : public IOverview {
     CHyprSignalListener             windowMoveHook;
     CHyprSignalListener             windowActiveHook;
     CHyprSignalListener             windowFullscreenHook;
+    CHyprSignalListener             windowTitleHook;
+    CHyprSignalListener             windowClassHook;
     CHyprSignalListener             keyboardKeyHook;
     CHyprSignalListener                                dragKeyboardKeyHook;
     CHyprSignalListener             workspaceCreatedHook;

@@ -43,6 +43,10 @@ plugin {
         wallpaper = 2 # 0: global only, 1: per-workspace only, 2: both
         blur = true # blur only the main overview wallpaper
 
+        search {
+            enabled = true # type while the overview is open to filter windows
+        }
+
         shadow {
             enabled = true
             range = 50
@@ -85,6 +89,12 @@ end)
 Set `cross_monitor_drag = true` to drag windows between monitors through ScrollOverview and adopt Hyprland move drags when another overview is open. It defaults to `false`. Native adoption uses Hyprland internals; if unavailable, overview-origin cross-monitor dragging still works.
 
 This setting does not affect overview-origin drags with `toggle all` because every overview is already open. Existing multi-monitor commands remain available when it is disabled.
+
+## Type-to-search
+
+With the overview open, typing text filters windows by title and application class/app ID without changing their workspace positions. The query is shared by all open monitor overviews. Use Backspace to edit, Escape to clear a non-empty query (or close when it is empty), the arrow keys to navigate matches, and Enter to activate the selected match. Set `search.enabled = false` to retain the pre-search keyboard behavior.
+
+Search input supports UTF-8 characters produced directly by the active XKB layout. Full input-method composition through fcitx/ibus is not currently available because the plugin does not own a Wayland text-input surface. Command-modified keys such as `SUPER+SHIFT+Left` remain available to Hyprland and overview submaps.
 
 ## Documentation
 

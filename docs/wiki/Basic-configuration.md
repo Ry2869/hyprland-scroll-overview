@@ -39,6 +39,7 @@ end)
 | cross_monitor_drag | bool | enable cross-monitor overview dragging and Hyprland move-drag adoption; does not affect `open all`, `toggle all`, or manually opened overviews | `false` |
 | wallpaper | int | wallpaper mode: `0` global only, `1` per-workspace only, `2` both | `0` |
 | blur | bool | blur the main overview wallpaper without blurring workspace wallpapers | `false` |
+| search.enabled | bool | enable native type-to-search while the overview is open | `true` |
 | input | structure | input configuration subcategory; accepts a structure containing the properties listed below | see below |
 | shadow | structure | shadow configuration subcategory; accepts a structure containing the properties listed below | see below |
 

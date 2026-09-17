@@ -293,6 +293,8 @@ static void registerConfigValues() {
                                   makeShared<CIntValue>("plugin:scrolloverview:input:drag_threshold", "overview drag threshold", 10,
                                                         SIntValueOptions{.min = 0}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CBoolValue>("plugin:scrolloverview:search:enabled", "enable native overview type-to-search", true));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
@@ -349,6 +351,10 @@ int getDragMode() {
 
 int getDragThreshold() {
     return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:drag_threshold"));
+}
+
+bool getSearchEnabled() {
+    return getValue<bool>("plugin:scrolloverview:search:enabled");
 }
 
 float getTouchpadScrollFactor() {

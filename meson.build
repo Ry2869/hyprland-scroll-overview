@@ -39,6 +39,7 @@ shared_module(meson.project_name(), src + [version_header],
   include_directories: include_directories('.'),
   dependencies: [
     dependency('hyprland'),
+    dependency('glib-2.0'),
     dependency('pixman-1'),
     dependency('libdrm'),
     dependency('pangocairo'),
@@ -50,3 +51,10 @@ shared_module(meson.project_name(), src + [version_header],
   ],
   install: true,
 )
+
+search_tests = executable('scrolloverview-search-tests',
+  ['Search.cpp', 'tests/SearchTests.cc'],
+  include_directories: include_directories('.'),
+  dependencies: [dependency('glib-2.0')],
+)
+test('scrolloverview-search-tests', search_tests)

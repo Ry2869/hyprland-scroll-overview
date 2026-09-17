@@ -7,6 +7,7 @@
 
 static std::vector<SP<IOverview>> g_scrollOverviews;
 static std::vector<WP<IOverview>> g_crossMonitorDragSession;
+static std::string                g_searchQuery;
 
 static void pruneCrossMonitorDragSession() {
     std::erase_if(g_crossMonitorDragSession, [](const auto& ref) {
@@ -68,6 +69,30 @@ void registerScrollOverview(const SP<IOverview>& overview) {
     g_pScrollOverview = overview;
 }
 
+const std::string& overviewSearchQuery() {
+    return g_searchQuery;
+}
+
+bool overviewSearchActive() {
+    return !g_searchQuery.empty();
+}
+
+void setOverviewSearchQuery(std::string query) {
+    if (query == g_searchQuery)
+        return;
+
+    g_searchQuery = std::move(query);
+    const auto overviews = g_scrollOverviews;
+    for (const auto& overview : overviews) {
+        if (overview)
+            overview->onSearchChanged();
+    }
+}
+
+void clearOverviewSearchQuery() {
+    setOverviewSearchQuery({});
+}
+
 void unregisterScrollOverview(IOverview* overview) {
     if (!overview)
         return;
@@ -75,6 +100,8 @@ void unregisterScrollOverview(IOverview* overview) {
     removeFromCrossMonitorDragSession(overview);
     std::erase_if(g_scrollOverviews, [overview](const auto& candidate) { return candidate.get() == overview; });
     g_pScrollOverview = activeScrollOverview();
+    if (g_scrollOverviews.empty())
+        g_searchQuery.clear();
 }
 
 void clearScrollOverviews() {
@@ -82,6 +109,7 @@ void clearScrollOverviews() {
     auto overviews = std::move(g_scrollOverviews);
     g_scrollOverviews.clear();
     g_pScrollOverview.reset();
+    g_searchQuery.clear();
     overviews.clear();
 }
 

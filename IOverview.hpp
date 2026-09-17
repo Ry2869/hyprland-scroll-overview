@@ -37,6 +37,8 @@ class IOverview {
     virtual void  selectHoveredWorkspace() = 0;
     virtual bool  moveSelection(const std::string& direction) = 0;
     virtual bool  windowDispatcherAction(const std::string& action) = 0;
+    virtual void  onSearchChanged() = 0;
+    virtual size_t searchResultCount() const = 0;
 
     virtual void  fullRender() = 0;
 
@@ -54,6 +56,10 @@ void                              closeAll();
 void                              registerScrollOverview(const SP<IOverview>& overview);
 void                              unregisterScrollOverview(IOverview* overview);
 void                              clearScrollOverviews();
+const std::string&                overviewSearchQuery();
+bool                              overviewSearchActive();
+void                              setOverviewSearchQuery(std::string query);
+void                              clearOverviewSearchQuery();
 void                              markCrossMonitorDragSession(IOverview* source, const SP<IOverview>& destination);
 bool                              closeCrossMonitorDragSession();
 void                              removeFromCrossMonitorDragSession(IOverview* overview);
