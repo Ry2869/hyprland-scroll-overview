@@ -332,7 +332,7 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CIntValue>("plugin:scrolloverview:search:max_width", "maximum search card width", 640, SIntValueOptions{.min = 120}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:search:top_offset", "search card top offset", 20, SIntValueOptions{.min = 0}));
+                                  makeShared<CIntValue>("plugin:scrolloverview:search:top_offset", "search card top offset", 40, SIntValueOptions{.min = 0}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
                                   makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
     HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));

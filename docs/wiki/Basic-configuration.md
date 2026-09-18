@@ -56,7 +56,7 @@ end)
 | search.font_size | int | query font size in logical pixels | `16` |
 | search.width_ratio | float | maximum card width as a fraction of monitor width | `0.5` |
 | search.max_width | int | maximum card width in logical pixels | `640` |
-| search.top_offset | int | top-centred card offset in logical pixels | `20` |
+| search.top_offset | int | top-centred card offset in logical pixels | `40` |
 | input | structure | input configuration subcategory; accepts a structure containing the properties listed below | see below |
 | shadow | structure | shadow configuration subcategory; accepts a structure containing the properties listed below | see below |
 

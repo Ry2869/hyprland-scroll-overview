@@ -61,7 +61,7 @@ plugin {
             font_size = 16
             width_ratio = 0.5
             max_width = 640
-            top_offset = 20
+            top_offset = 40
         }
 
         shadow {
