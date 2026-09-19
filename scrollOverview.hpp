@@ -108,7 +108,12 @@ class CScrollOverview : public IOverview {
     void   updateWorkspaceOverflow();
     CBox   workspaceOverviewVisibleBox(size_t workspaceIdx, const CBox& workspaceBox, float renderScale, PHLMONITOR monitor) const;
     float      workspaceOverviewOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
-    float      workspaceOverviewLogicalOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
+    float      workspaceOverviewLogicalOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale) const;
+    float      workspaceOverviewRawOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const;
+    float      computeTargetScale();
+    Vector2D   totalViewOffset() const;
+    float      workspaceViewFitShift(size_t activeIdx, float workspacePitch, float renderScale) const;
+    float      workspaceViewDelta(size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale) const;
     float      workspaceOverviewAlpha(size_t workspaceIdx) const;
     PHLWINDOW windowAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWINDOW windowAtOverviewCursor(size_t* workspaceIdx = nullptr);
@@ -290,6 +295,10 @@ class CScrollOverview : public IOverview {
     PHLWORKSPACE                     startedOn;
 
     PHLANIMVAR<float>                scale;
+    float                            targetScale   = 0.5F;
+    WORKSPACEID                      autoSpanFirst = WORKSPACE_INVALID;
+    WORKSPACEID                      autoSpanLast  = WORKSPACE_INVALID;
+    float                            autoAcrossShift = 0.F;
     PHLANIMVAR<Vector2D>             viewOffset;
     PHLANIMVAR<float>                workspaceInsertProgress;
     PHLANIMVAR<float>                workspaceInsertFadeProgress;

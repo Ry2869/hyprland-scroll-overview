@@ -88,6 +88,7 @@ int           getGestureDistance();
 float         getScale();
 int           getWorkspaceGap();
 ELayout       getLayout();
+bool          getAutoFit();
 bool          getCrossMonitorDrag();
 int           getScrollEventDelay();
 bool          getLeftHanded();

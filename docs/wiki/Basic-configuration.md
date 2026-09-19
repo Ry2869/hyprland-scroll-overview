@@ -34,6 +34,7 @@ end)
 | --- | --- | --- | --- |
 | gesture_distance | number | how far is the max for the gesture | `200` |
 | scale | float | overview scale, [0.1–0.9] | `0.5` |
+| auto_fit | bool | pick the scale each time the overview opens so the content fills the screen: every non-empty workspace (and the empty ones between them) vertically and the whole width covered by the scrolling layouts (windows overflowing left / right of the screen) horizontally, then centered; when `true`, `scale` is not used and there is no scale limit | `false` |
 | workspace_gap | number | gap between visible workspaces in the overview, in pixels | `0` |
 | layout | string | overview layout: `vertical`, `horizontal`, or `auto`; auto uses horizontal on portrait monitors and vertical on landscape monitors | `vertical` |
 | cross_monitor_drag | bool | enable cross-monitor overview dragging and Hyprland move-drag adoption; does not affect `open all`, `toggle all`, or manually opened overviews | `false` |
