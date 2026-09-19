@@ -37,7 +37,8 @@ For more installation methods, including building from source and loading the pl
 plugin {
     scrolloverview {
         gesture_distance = 300 # how far is the "max" for the gesture
-        scale = 0.5 # preferred overview scale
+        scale = 0.5 # preferred overview scale (not used when auto_fit = true)
+        auto_fit = false # true: compute the scale on open to fill the screen, scale is then ignored
         workspace_gap = 100
         layout = vertical # vertical, horizontal, or auto (per-monitor orientation)
         wallpaper = 2 # 0: global only, 1: per-workspace only, 2: both
@@ -62,7 +63,8 @@ hl.config({
     plugin = {
         scrolloverview = {
             gesture_distance = 300, -- how far is the "max" for the gesture
-            scale = 0.5, -- preferred overview scale
+            scale = 0.5, -- preferred overview scale (not used when auto_fit = true)
+            auto_fit = false, -- true: compute the scale on open to fill the screen, scale is then ignored
             workspace_gap = 100,
             layout = "vertical", -- vertical, horizontal, or auto (per-monitor orientation)
             wallpaper = 2, -- 0: global only, 1: per-workspace only, 2: both
