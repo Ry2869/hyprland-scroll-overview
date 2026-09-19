@@ -209,4 +209,21 @@ std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis,
     return results;
 }
 
+std::vector<size_t> matchingRowIndices(const std::vector<bool>& rowMatches) {
+    std::vector<size_t> indices;
+    indices.reserve(rowMatches.size());
+    for (size_t i = 0; i < rowMatches.size(); ++i) {
+        if (rowMatches[i])
+            indices.push_back(i);
+    }
+    return indices;
+}
+
+std::optional<size_t> rowRank(const std::vector<size_t>& visibleRows, size_t workspaceIndex) {
+    const auto it = std::ranges::find(visibleRows, workspaceIndex);
+    if (it == visibleRows.end())
+        return std::nullopt;
+    return std::distance(visibleRows.begin(), it);
+}
+
 }

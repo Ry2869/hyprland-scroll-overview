@@ -99,6 +99,10 @@ class CScrollOverview : public IOverview {
     bool       shouldRenderOverviewWindow(const PHLWINDOW& window) const;
     bool       shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) const;
     void       rebuildSearchLayout();
+    bool       usesCompactedSearchWorkspaceRows() const;
+    bool       workspaceVisibleInOverview(size_t workspaceIdx) const;
+    std::optional<size_t> workspaceDisplayRank(size_t workspaceIdx) const;
+    size_t     workspaceDisplayAnchorIndex(size_t fallbackIdx) const;
     std::optional<CBox> searchLayoutGlobalBox(const PHLWINDOW& window) const;
     CBox       overviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
                                   bool round = true) const;
@@ -340,6 +344,7 @@ class CScrollOverview : public IOverview {
     std::unordered_set<uint32_t>     consumedSearchKeys;
     std::string                      normalizedSearchQuery;
     std::unordered_map<Desktop::View::CWindow*, CBox> searchLayoutBoxes;
+    std::vector<size_t>              searchVisibleWorkspaceIndices;
     std::string                      searchQueryCacheLabel;
     std::string                      searchCountCacheLabel;
     float                            searchTextCacheScale = 0.F;

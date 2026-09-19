@@ -57,6 +57,15 @@ int main() {
     };
     const SBox viewport = {0, 0, 1920, 1080};
 
+    CHECK(ScrollOverview::SearchLayout::matchingRowIndices({true, false, true}) == std::vector<size_t>({0, 2}));
+    CHECK(ScrollOverview::SearchLayout::matchingRowIndices({false, true, false, false, true}) == std::vector<size_t>({1, 4}));
+    CHECK(ScrollOverview::SearchLayout::matchingRowIndices({false, false, false}).empty());
+    CHECK(ScrollOverview::SearchLayout::matchingRowIndices({true}) == std::vector<size_t>({0}));
+    const auto compactRows = ScrollOverview::SearchLayout::matchingRowIndices({true, false, true});
+    CHECK(ScrollOverview::SearchLayout::rowRank(compactRows, 0) == 0);
+    CHECK(ScrollOverview::SearchLayout::rowRank(compactRows, 2) == 1);
+    CHECK(!ScrollOverview::SearchLayout::rowRank(compactRows, 1));
+
     const std::vector<SItem> oneFilteredMatch = {
         {.id = 1, .box = {0, 0, 900, 600}, .matches = true},
         {.id = 2, .box = {910, 0, 900, 600}, .matches = false},

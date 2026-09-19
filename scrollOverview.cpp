@@ -2081,7 +2081,7 @@ float CScrollOverview::workspaceOverviewOffset(size_t workspaceIdx, size_t activ
     const auto RENDEREDLOGICALUNIT = RENDERSCALE * MONITORSCALE;
     const auto DEFAULTOFFSET       = workspaceOverviewLogicalOffset(workspaceIdx, activeIdx, LOGICALPITCH) * RENDEREDLOGICALUNIT;
 
-    if (!workspaceInsertTransition.active || workspaceIdx >= images.size() || !images[workspaceIdx] || !images[workspaceIdx]->pWorkspace)
+    if (overviewSearchActive() || !workspaceInsertTransition.active || workspaceIdx >= images.size() || !images[workspaceIdx] || !images[workspaceIdx]->pWorkspace)
         return DEFAULTOFFSET;
 
     const auto WORKSPACEID = images[workspaceIdx]->pWorkspace->m_id;
@@ -2101,24 +2101,41 @@ float CScrollOverview::workspaceOverviewOffset(size_t workspaceIdx, size_t activ
 }
 
 float CScrollOverview::workspaceOverviewLogicalOffset(size_t workspaceIdx, size_t activeIdx, float workspacePitch) const {
-    const auto EXTRAINTERVAL = [this](size_t workspaceIdx_) -> float {
-        if (workspaceIdx_ + 1 >= images.size() || !images[workspaceIdx_] || !images[workspaceIdx_ + 1])
+    const auto EXTRAINTERVAL = [this](size_t firstIdx, size_t secondIdx) -> float {
+        if (firstIdx >= images.size() || secondIdx >= images.size() || !images[firstIdx] || !images[secondIdx])
             return 0.F;
 
         if (layout == ScrollOverview::Config::ELayout::HORIZONTAL)
-            return images[workspaceIdx_]->overflowRight + images[workspaceIdx_ + 1]->overflowLeft;
+            return images[firstIdx]->overflowRight + images[secondIdx]->overflowLeft;
 
-        return images[workspaceIdx_]->overflowBottom + images[workspaceIdx_ + 1]->overflowTop;
+        return images[firstIdx]->overflowBottom + images[secondIdx]->overflowTop;
     };
+
+    if (usesCompactedSearchWorkspaceRows()) {
+        const auto WORKSPACERANK = workspaceDisplayRank(workspaceIdx);
+        const auto ANCHORRANK    = workspaceDisplayRank(workspaceDisplayAnchorIndex(activeIdx));
+        if (!WORKSPACERANK || !ANCHORRANK)
+            return 0.F;
+
+        float offset = 0.F;
+        if (*WORKSPACERANK > *ANCHORRANK) {
+            for (size_t rank = *ANCHORRANK; rank < *WORKSPACERANK; ++rank)
+                offset += workspacePitch + EXTRAINTERVAL(searchVisibleWorkspaceIndices[rank], searchVisibleWorkspaceIndices[rank + 1]);
+        } else {
+            for (size_t rank = *WORKSPACERANK; rank < *ANCHORRANK; ++rank)
+                offset -= workspacePitch + EXTRAINTERVAL(searchVisibleWorkspaceIndices[rank], searchVisibleWorkspaceIndices[rank + 1]);
+        }
+        return offset;
+    }
 
     float offset = 0.F;
 
     if (workspaceIdx > activeIdx) {
         for (size_t i = activeIdx; i < workspaceIdx; ++i)
-            offset += workspacePitch + EXTRAINTERVAL(i);
+            offset += workspacePitch + EXTRAINTERVAL(i, i + 1);
     } else {
         for (size_t i = workspaceIdx; i < activeIdx; ++i)
-            offset -= workspacePitch + EXTRAINTERVAL(i);
+            offset -= workspacePitch + EXTRAINTERVAL(i, i + 1);
     }
 
     return offset;
@@ -2235,8 +2252,50 @@ bool CScrollOverview::shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) 
     return shouldShowPinnedFloatingOverviewWindow(window) && windowMatchesSearch(window);
 }
 
+bool CScrollOverview::usesCompactedSearchWorkspaceRows() const {
+    const bool dragInProgress = dragActiveWindow || (g_pointerGrabOverview && g_pointerGrabOverview->dragActiveWindow);
+    return overviewSearchActive() && !dragInProgress;
+}
+
+bool CScrollOverview::workspaceVisibleInOverview(size_t workspaceIdx) const {
+    if (workspaceIdx >= images.size() || !images[workspaceIdx] || !images[workspaceIdx]->pWorkspace)
+        return false;
+    if (!usesCompactedSearchWorkspaceRows())
+        return true;
+    return std::ranges::find(searchVisibleWorkspaceIndices, workspaceIdx) != searchVisibleWorkspaceIndices.end();
+}
+
+std::optional<size_t> CScrollOverview::workspaceDisplayRank(size_t workspaceIdx) const {
+    if (workspaceIdx >= images.size())
+        return std::nullopt;
+    if (!usesCompactedSearchWorkspaceRows())
+        return workspaceIdx;
+
+    return ScrollOverview::SearchLayout::rowRank(searchVisibleWorkspaceIndices, workspaceIdx);
+}
+
+size_t CScrollOverview::workspaceDisplayAnchorIndex(size_t fallbackIdx) const {
+    if (!usesCompactedSearchWorkspaceRows())
+        return fallbackIdx;
+
+    const auto selected = getOverviewWindowToShow(closeOnWindow.lock());
+    if (selected && selected->m_workspace) {
+        for (const auto workspaceIdx : searchVisibleWorkspaceIndices) {
+            if (images[workspaceIdx] && images[workspaceIdx]->pWorkspace == selected->m_workspace)
+                return workspaceIdx;
+        }
+    }
+
+    if (workspaceDisplayRank(viewportCurrentWorkspace))
+        return viewportCurrentWorkspace;
+    if (workspaceDisplayRank(fallbackIdx))
+        return fallbackIdx;
+    return searchVisibleWorkspaceIndices.empty() ? fallbackIdx : searchVisibleWorkspaceIndices.front();
+}
+
 void CScrollOverview::rebuildSearchLayout() {
     searchLayoutBoxes.clear();
+    searchVisibleWorkspaceIndices.clear();
     if (!overviewSearchActive())
         return;
 
@@ -2303,6 +2362,18 @@ void CScrollOverview::rebuildSearchLayout() {
             searchLayoutBoxes[windows[result.id].get()] = CBox{result.box.x, result.box.y, result.box.width, result.box.height};
         }
     }
+
+    std::vector<bool> rowMatches(images.size(), false);
+    for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        const auto& image = images[workspaceIdx];
+        if (!image)
+            continue;
+        rowMatches[workspaceIdx] = std::ranges::any_of(image->windows, [this](const auto& windowRef) {
+            const auto window = getOverviewWindowToShow(windowRef.lock());
+            return shouldRenderOverviewWindow(window) && !shouldRenderPinnedOverviewWindow(window);
+        });
+    }
+    searchVisibleWorkspaceIndices = ScrollOverview::SearchLayout::matchingRowIndices(rowMatches);
 }
 
 std::optional<CBox> CScrollOverview::searchLayoutGlobalBox(const PHLWINDOW& window_) const {
@@ -2361,6 +2432,11 @@ void CScrollOverview::onSearchChanged() {
     normalizedSearchQuery = ScrollOverview::Search::normalize(overviewSearchQuery());
     searchQueryCacheLabel.clear();
     searchCountCacheLabel.clear();
+    trackpadWorkspaceFollowing   = false;
+    trackpadScrollAccum          = 0.0;
+    trackpadGestureSettlePending = false;
+    viewOffset->setValueAndWarp(Vector2D{});
+    *viewOffset = Vector2D{};
 
     const auto selected = getOverviewWindowToShow(closeOnWindow.lock());
     if (!WASSEARCHACTIVE && overviewSearchActive() && selected &&
@@ -2426,13 +2502,19 @@ void CScrollOverview::reconcileSearchSelection() {
     size_t    bestWorkspaceIdx = images.size();
     double    bestScore        = std::numeric_limits<double>::max();
     const auto currentIdx      = std::min(viewportCurrentWorkspace, images.empty() ? size_t{0} : images.size() - 1);
+    const auto currentRank     = workspaceDisplayRank(workspaceDisplayAnchorIndex(currentIdx));
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& image = images[workspaceIdx];
         if (!image || !image->pWorkspace)
             continue;
 
-        const double workspacePenalty = std::abs(sc<double>(workspaceIdx) - sc<double>(currentIdx)) * 1'000'000'000.0;
+        const auto workspaceRank = workspaceDisplayRank(workspaceIdx);
+        const double workspaceDistance = currentRank && workspaceRank ? std::abs(sc<double>(*workspaceRank) - sc<double>(*currentRank)) :
+                                                                        std::abs(sc<double>(workspaceIdx) - sc<double>(currentIdx));
+        const double workspacePenalty = workspaceDistance * 1'000'000'000.0;
         const auto   offset = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
         const auto   workspaceBox = getOverviewWorkspaceBox(MONITOR, scale->value(), viewOffset->value(), offset, layout);
 
@@ -2501,11 +2583,12 @@ void CScrollOverview::updateWorkspaceOverflow() {
 
         for (const auto& windowRef : img->windows) {
             const auto window = getOverviewWindowToShow(windowRef.lock());
-            if (!shouldShowOverviewWindow(window) || window->m_isFloating)
+            if (!shouldRenderOverviewWindow(window) || window->m_isFloating)
                 continue;
 
-            const auto POS  = window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - MONITOR->m_position;
-            const auto SIZE = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+            const auto WINDOWBOX = searchLayoutGlobalBox(window).value_or(window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT));
+            const auto POS       = WINDOWBOX.pos() - MONITOR->m_position;
+            const auto SIZE      = WINDOWBOX.size();
             // Windows hidden under a fullscreen window can get sentinel geometry like -2x-2.
             if (SIZE.x <= 0 || SIZE.y <= 0)
                 continue;
@@ -2568,6 +2651,8 @@ PHLWINDOW CScrollOverview::windowAtOverviewPoint(const Vector2D& point, size_t* 
 
     const auto WORKSPACEPITCH = getWorkspaceRenderedPitch(MONITOR, scale->value(), layout);
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& wimg = images[workspaceIdx];
         const auto  offset = workspaceOverviewOffset(workspaceIdx, activeIdx, WORKSPACEPITCH);
 
@@ -2623,7 +2708,7 @@ PHLWINDOW CScrollOverview::windowAtOverviewCursor(size_t* hoveredWorkspaceIdx) {
 
 PHLWINDOW CScrollOverview::windowClosestToWorkspaceCenter(size_t workspaceIdx) const {
     const auto MONITOR = pMonitor.lock();
-    if (!MONITOR || workspaceIdx >= images.size() || !images[workspaceIdx] || !images[workspaceIdx]->pWorkspace)
+    if (!MONITOR || !workspaceVisibleInOverview(workspaceIdx))
         return {};
 
     const auto& WORKSPACEIMAGE  = images[workspaceIdx];
@@ -2906,6 +2991,8 @@ PHLWORKSPACE CScrollOverview::workspaceAtOverviewPoint(const Vector2D& point, si
         return nullptr;
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& wimg = images[workspaceIdx];
         if (!wimg || !wimg->pWorkspace)
             continue;
@@ -2934,6 +3021,8 @@ PHLWORKSPACE CScrollOverview::workspaceAtOverviewDropPoint(const Vector2D& point
     const auto WORKSPACEPITCH = getWorkspaceRenderedPitch(MONITOR, scale->value(), layout);
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& wimg = images[workspaceIdx];
         if (!wimg || !wimg->pWorkspace)
             continue;
@@ -2958,6 +3047,8 @@ PHLWORKSPACE CScrollOverview::workspaceAtOverviewDropPoint(const Vector2D& point
     }
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& wimg = images[workspaceIdx];
         if (!wimg || !wimg->pWorkspace)
             continue;
@@ -3993,15 +4084,25 @@ void CScrollOverview::moveViewportWorkspace(bool up) {
     if (images.empty())
         return;
 
-    if (viewportCurrentWorkspace == 0 && !up)
-        return;
-    if (viewportCurrentWorkspace == images.size() - 1 && up)
-        return;
+    if (usesCompactedSearchWorkspaceRows()) {
+        if (searchVisibleWorkspaceIndices.empty())
+            return;
 
-    if (up)
-        viewportCurrentWorkspace++;
-    else
-        viewportCurrentWorkspace--;
+        const auto currentRank = workspaceDisplayRank(workspaceDisplayAnchorIndex(viewportCurrentWorkspace));
+        if (!currentRank || (!up && *currentRank == 0) || (up && *currentRank + 1 >= searchVisibleWorkspaceIndices.size()))
+            return;
+        viewportCurrentWorkspace = searchVisibleWorkspaceIndices[up ? *currentRank + 1 : *currentRank - 1];
+    } else {
+        if (viewportCurrentWorkspace == 0 && !up)
+            return;
+        if (viewportCurrentWorkspace == images.size() - 1 && up)
+            return;
+
+        if (up)
+            viewportCurrentWorkspace++;
+        else
+            viewportCurrentWorkspace--;
+    }
 
     const auto& TARGETWORKSPACEIMAGE = images[viewportCurrentWorkspace];
     if (!TARGETWORKSPACEIMAGE || !TARGETWORKSPACEIMAGE->pWorkspace)
@@ -4088,7 +4189,7 @@ double CScrollOverview::trackpadWorkspaceScrollOffset(PHLMONITOR monitor, float 
     double maxOffset = 0.0;
 
     for (size_t i = 0; i < images.size(); ++i) {
-        if (!images[i] || !images[i]->pWorkspace)
+        if (!workspaceVisibleInOverview(i))
             continue;
 
         const double WORKSPACEOFFSET = workspaceOverviewLogicalOffset(i, viewportCurrentWorkspace, LOGICALPITCH);
@@ -4126,7 +4227,7 @@ void CScrollOverview::finishWorkspaceScrollFollow() {
     double bestDistance = std::numeric_limits<double>::max();
 
     for (size_t i = 0; i < images.size(); ++i) {
-        if (!images[i] || !images[i]->pWorkspace)
+        if (!workspaceVisibleInOverview(i))
             continue;
 
         const auto   WORKSPACEBOX = getOverviewWorkspaceBox(MONITOR, SCALE, viewOffset->value(), workspaceOverviewOffset(i, ACTIVEIDX, RENDEREDPITCH), layout);
@@ -4150,7 +4251,10 @@ void CScrollOverview::finishWorkspaceScrollFollow() {
 
     const size_t BEFORE = viewportCurrentWorkspace;
     const bool   NEXT   = targetIdx > viewportCurrentWorkspace;
-    const size_t STEPS  = sc<size_t>(std::abs(sc<long>(targetIdx) - sc<long>(viewportCurrentWorkspace)));
+    const auto   CURRENTRANK = workspaceDisplayRank(workspaceDisplayAnchorIndex(viewportCurrentWorkspace));
+    const auto   TARGETRANK  = workspaceDisplayRank(targetIdx);
+    const size_t STEPS = CURRENTRANK && TARGETRANK ? sc<size_t>(std::abs(sc<long>(*TARGETRANK) - sc<long>(*CURRENTRANK))) :
+                                                     sc<size_t>(std::abs(sc<long>(targetIdx) - sc<long>(viewportCurrentWorkspace)));
     for (size_t i = 0; i < STEPS; ++i)
         moveViewportWorkspace(NEXT);
 
@@ -4873,6 +4977,8 @@ static PHLWINDOW getOverviewFullscreenVisibilityWindow(const PHLWORKSPACE& works
 
 void CScrollOverview::renderWorkspaceBackground(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode,
                                                 const Time::steady_tp& now) {
+    if (!workspaceVisibleInOverview(workspaceIdx))
+        return;
     const auto& workspaceImage = images[workspaceIdx];
     if (!workspaceImage || !workspaceImage->pWorkspace)
         return;
@@ -4908,6 +5014,8 @@ void CScrollOverview::renderWorkspaceBackground(PHLMONITOR monitor, size_t works
 }
 
 void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now) {
+    if (!workspaceVisibleInOverview(workspaceIdx))
+        return;
     const auto& workspaceImage = images[workspaceIdx];
     if (!workspaceImage || !workspaceImage->pWorkspace)
         return;
@@ -5033,6 +5141,8 @@ bool CScrollOverview::hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t
     const auto DRAGGEDWINDOW = getOverviewWindowToShow(dragActiveWindow.lock());
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || !workspaceImage->pWorkspace)
             continue;
@@ -5250,6 +5360,8 @@ bool CScrollOverview::isVisibleRealtimePreviewWindow(const PHLWINDOW& window) co
     const auto PITCH     = getWorkspaceRenderedPitch(MONITOR, SCALE, layout);
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || !workspaceImage->pWorkspace || workspaceImage->pWorkspace != window->m_workspace)
             continue;
@@ -5440,6 +5552,8 @@ bool CScrollOverview::shouldSuppressRenderDamage() const {
     }
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || !workspaceImage->pWorkspace)
             continue;
@@ -5536,6 +5650,8 @@ void CScrollOverview::sendOverviewFrameCallbacks(const Time::steady_tp& now) {
     }
 
     for (size_t workspaceIdx = 0; workspaceIdx < images.size(); ++workspaceIdx) {
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            continue;
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || !workspaceImage->pWorkspace)
             continue;
@@ -5640,6 +5756,8 @@ bool CScrollOverview::shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, co
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || workspaceImage->pWorkspace != window->m_workspace)
             continue;
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            return false;
 
         if (!overviewSearchActive() && !isWorkspaceScrolling(workspaceImage->pWorkspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspaceImage->pWorkspace));
@@ -5744,6 +5862,8 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         const auto& workspaceImage = images[workspaceIdx];
         if (!workspaceImage || workspaceImage->pWorkspace != window->m_workspace)
             continue;
+        if (!workspaceVisibleInOverview(workspaceIdx))
+            return false;
 
         if (!overviewSearchActive() && !isWorkspaceScrolling(workspaceImage->pWorkspace)) {
             const auto fullscreenWindow = getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(workspaceImage->pWorkspace));
@@ -6130,7 +6250,7 @@ void CScrollOverview::render() {
         renderWorkspaceBackground(MONITOR, workspaceIdx, ACTIVEIDX, PITCH, SCALE, WALLPAPERMODE, NOW);
     }
 
-    if (workspaceInsertTransition.active && !workspaceInsertTransition.transitionFadeIn) {
+    if (!overviewSearchActive() && workspaceInsertTransition.active && !workspaceInsertTransition.transitionFadeIn) {
         const auto GHOSTALPHA   = 1.F - std::clamp(workspaceInsertFadeProgress->value(), 0.F, 1.F);
         const auto GHOSTOFFSET = workspaceInsertTransition.transitionOldRelativeOffset * SCALE * MONITOR->m_scale;
         const auto GHOSTBOX     = getOverviewWorkspaceBox(MONITOR, SCALE, viewOffset->value(), GHOSTOFFSET, layout);
