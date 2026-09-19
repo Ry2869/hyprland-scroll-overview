@@ -1883,7 +1883,7 @@ float CScrollOverview::computeTargetScale() {
     }
 
     // leave a little room around the centered content
-    return std::max(std::min(ALONGSCALE, ACROSSSCALE) * 0.95F, 0.01F);
+    return std::clamp(std::min(ALONGSCALE, ACROSSSCALE) * 0.9F, 0.01F, 0.9F);
 }
 
 Vector2D CScrollOverview::totalViewOffset() const {
@@ -1922,6 +1922,35 @@ float CScrollOverview::workspaceViewFitShift(size_t activeIdx, float workspacePi
         }
 
         if (spanFirst < images.size() && spanLast < images.size()) {
+            const auto POSITION = [&](size_t i) { return workspaceOverviewRawOffset(i, 0, workspacePitch); };
+
+            // The span is centered and stays put while the active workspace is visible. Past it, the view moves
+            // by whole workspaces only, so workspaces always land on the same grid as when the overview opened.
+            if (POSITION(spanLast) - POSITION(spanFirst) + EXTENT <= VIEW) {
+                const float EPSILON = 0.5F;
+                const float CENTER  = (POSITION(spanFirst) + POSITION(spanLast)) / 2.F;
+                const float ACTIVE  = POSITION(activeIdx);
+                float       shift   = 0.F;
+
+                if (ACTIVE + EXTENT / 2.F > CENTER + VIEW / 2.F + EPSILON) {
+                    const float NEEDED = ACTIVE + EXTENT / 2.F - (CENTER + VIEW / 2.F);
+                    for (size_t i = spanLast + 1; i < images.size(); ++i) {
+                        shift = POSITION(i) - POSITION(spanLast);
+                        if (shift >= NEEDED - EPSILON || i >= activeIdx)
+                            break;
+                    }
+                } else if (ACTIVE - EXTENT / 2.F < CENTER - VIEW / 2.F - EPSILON) {
+                    const float NEEDED = CENTER - VIEW / 2.F - (ACTIVE - EXTENT / 2.F);
+                    for (size_t i = spanFirst; i-- > 0;) {
+                        shift = POSITION(i) - POSITION(spanFirst);
+                        if (-shift >= NEEDED - EPSILON || i <= activeIdx)
+                            break;
+                    }
+                }
+
+                return CENTER + shift - ACTIVE;
+            }
+
             first = std::min(spanFirst, activeIdx);
             last  = std::max(spanLast, activeIdx);
         }
