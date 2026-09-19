@@ -93,7 +93,6 @@ static void restoreActiveWorkspaceVisibility() {
             workspace->m_alpha->setValueAndWarp(1.F);
             workspace->m_renderOffset->setValueAndWarp(Vector2D{});
         }
-
         g_pHyprRenderer->damageMonitor(monitor);
     }
 }
@@ -1058,11 +1057,13 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     Animation::mgr()->createAnimation({}, viewOffset, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     Animation::mgr()->createAnimation(1.F, workspaceInsertProgress, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     Animation::mgr()->createAnimation(1.F, workspaceInsertFadeProgress, workspaceInsertFadeConfig, AVARDAMAGE_NONE);
+    Animation::mgr()->createAnimation(1.F, searchLayoutProgress, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
 
     scale->setUpdateCallback([this](auto) { damage(); });
     viewOffset->setUpdateCallback([this](auto) { damage(); });
     workspaceInsertProgress->setUpdateCallback([this](auto) { damage(); });
     workspaceInsertFadeProgress->setUpdateCallback([this](auto) { damage(); });
+    searchLayoutProgress->setUpdateCallback([this](auto) { damage(); });
 
     if (!swipe)
         *scale = ScrollOverview::Config::getScale();
@@ -2293,11 +2294,22 @@ size_t CScrollOverview::workspaceDisplayAnchorIndex(size_t fallbackIdx) const {
     return searchVisibleWorkspaceIndices.empty() ? fallbackIdx : searchVisibleWorkspaceIndices.front();
 }
 
-void CScrollOverview::rebuildSearchLayout() {
-    searchLayoutBoxes.clear();
-    searchVisibleWorkspaceIndices.clear();
-    if (!overviewSearchActive())
+void CScrollOverview::resetSearchLayoutAnimation() {
+    searchLayoutStartBoxes.clear();
+    if (searchLayoutProgress)
+        searchLayoutProgress->setValueAndWarp(1.F);
+}
+
+void CScrollOverview::rebuildSearchLayout(bool animateSelectionChange) {
+    if (!overviewSearchActive()) {
+        searchLayoutBoxes.clear();
+        searchVisibleWorkspaceIndices.clear();
+        resetSearchLayoutAnimation();
         return;
+    }
+
+    std::unordered_map<Desktop::View::CWindow*, CBox> nextBoxes;
+    bool                                               hasCompactedResults = false;
 
     for (const auto& image : images) {
         if (!image || !image->pWorkspace)
@@ -2327,6 +2339,10 @@ void CScrollOverview::rebuildSearchLayout() {
 
         if (items.empty())
             continue;
+
+        const bool hasMatch  = std::ranges::any_of(items, [](const auto& item) { return item.matches; });
+        const bool hasHidden = std::ranges::any_of(items, [](const auto& item) { return !item.matches; });
+        hasCompactedResults |= hasMatch && hasHidden;
 
         std::optional<size_t> selectedId;
         const auto            selected   = getOverviewWindowToShow(closeOnWindow.lock());
@@ -2359,7 +2375,7 @@ void CScrollOverview::rebuildSearchLayout() {
         for (const auto& result : compacted) {
             if (result.id >= windows.size() || !windows[result.id])
                 continue;
-            searchLayoutBoxes[windows[result.id].get()] = CBox{result.box.x, result.box.y, result.box.width, result.box.height};
+            nextBoxes[windows[result.id].get()] = CBox{result.box.x, result.box.y, result.box.width, result.box.height};
         }
     }
 
@@ -2373,7 +2389,50 @@ void CScrollOverview::rebuildSearchLayout() {
             return shouldRenderOverviewWindow(window) && !shouldRenderPinnedOverviewWindow(window);
         });
     }
-    searchVisibleWorkspaceIndices = ScrollOverview::SearchLayout::matchingRowIndices(rowMatches);
+    auto nextVisibleWorkspaceIndices = ScrollOverview::SearchLayout::matchingRowIndices(rowMatches);
+    const auto mapsEqual = [](const auto& lhs, const auto& rhs) {
+        if (lhs.size() != rhs.size())
+            return false;
+        return std::ranges::all_of(lhs, [&rhs](const auto& entry) {
+            const auto it = rhs.find(entry.first);
+            return it != rhs.end() && overviewBoxesEqual(entry.second, it->second);
+        });
+    };
+
+    const bool TARGETSCHANGED = !mapsEqual(searchLayoutBoxes, nextBoxes);
+    const bool ANIMATE = animateSelectionChange && hasCompactedResults && TARGETSCHANGED && !searchLayoutBoxes.empty() &&
+        ScrollOverview::Config::getValue<int>("animations:enabled") && searchLayoutProgress;
+
+    if (ANIMATE) {
+        const auto PROGRESS = std::clamp(sc<double>(searchLayoutProgress->value()), 0.0, 1.0);
+        std::unordered_map<Desktop::View::CWindow*, CBox> currentBoxes;
+        currentBoxes.reserve(nextBoxes.size());
+        for (const auto& entry : nextBoxes) {
+            const auto oldTarget = searchLayoutBoxes.find(entry.first);
+            if (oldTarget == searchLayoutBoxes.end()) {
+                currentBoxes[entry.first] = entry.second;
+                continue;
+            }
+
+            const auto oldStart = searchLayoutStartBoxes.find(entry.first);
+            const auto& start   = oldStart == searchLayoutStartBoxes.end() ? oldTarget->second : oldStart->second;
+            const auto  current = ScrollOverview::SearchLayout::interpolate(
+                {.x = start.x, .y = start.y, .width = start.width, .height = start.height},
+                {.x = oldTarget->second.x, .y = oldTarget->second.y, .width = oldTarget->second.width, .height = oldTarget->second.height}, PROGRESS);
+            currentBoxes[entry.first] = CBox{current.x, current.y, current.width, current.height};
+        }
+
+        searchLayoutStartBoxes = std::move(currentBoxes);
+        searchLayoutBoxes      = std::move(nextBoxes);
+        searchLayoutProgress->setValueAndWarp(0.F);
+        *searchLayoutProgress = 1.F;
+    } else {
+        searchLayoutBoxes = std::move(nextBoxes);
+        if (!searchLayoutProgress || !searchLayoutProgress->isBeingAnimated())
+            resetSearchLayoutAnimation();
+    }
+
+    searchVisibleWorkspaceIndices = std::move(nextVisibleWorkspaceIndices);
 }
 
 std::optional<CBox> CScrollOverview::searchLayoutGlobalBox(const PHLWINDOW& window_) const {
@@ -2381,8 +2440,18 @@ std::optional<CBox> CScrollOverview::searchLayoutGlobalBox(const PHLWINDOW& wind
     if (!overviewSearchActive() || !window || window->m_isFloating)
         return std::nullopt;
 
-    const auto it = searchLayoutBoxes.find(window.get());
-    return it == searchLayoutBoxes.end() ? std::nullopt : std::optional<CBox>{it->second};
+    const auto target = searchLayoutBoxes.find(window.get());
+    if (target == searchLayoutBoxes.end())
+        return std::nullopt;
+
+    const auto start = searchLayoutStartBoxes.find(window.get());
+    if (start == searchLayoutStartBoxes.end() || !searchLayoutProgress)
+        return target->second;
+
+    const auto box = ScrollOverview::SearchLayout::interpolate(
+        {.x = start->second.x, .y = start->second.y, .width = start->second.width, .height = start->second.height},
+        {.x = target->second.x, .y = target->second.y, .width = target->second.width, .height = target->second.height}, searchLayoutProgress->value());
+    return CBox{box.x, box.y, box.width, box.height};
 }
 
 CBox CScrollOverview::overviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float renderScale, const Vector2D& currentViewOffset, float workspaceOffset,
@@ -2443,6 +2512,7 @@ void CScrollOverview::onSearchChanged() {
         (shouldShowOverviewWindow(selected) || shouldShowPinnedFloatingOverviewWindow(selected)))
         searchSelectionAnchor = selected;
 
+    resetSearchLayoutAnimation();
     rebuildSearchLayout();
     reconcileSearchSelection();
     rebuildSearchLayout();
@@ -3089,11 +3159,12 @@ bool CScrollOverview::selectOverviewWindow(PHLWINDOW window, size_t workspaceIdx
     if (!window || (overviewSearchActive() && !shouldRenderOverviewWindow(window) && !shouldRenderPinnedOverviewWindow(window)))
         return false;
 
+    const auto previousWindow = getOverviewWindowToShow(closeOnWindow.lock());
     closeOnWindow            = window;
     viewportCurrentWorkspace = workspaceIdx;
     rememberSelection(window);
     if (overviewSearchActive())
-        rebuildSearchLayout();
+        rebuildSearchLayout(previousWindow && previousWindow != window && previousWindow->m_workspace == window->m_workspace);
     if (syncFocus) {
         if (const auto MONITOR = pMonitor.lock(); MONITOR && Desktop::focusState()->monitor() != MONITOR)
             Desktop::focusState()->rawMonitorFocus(MONITOR);
@@ -4486,7 +4557,7 @@ bool CScrollOverview::moveSearchSelection(const std::string& direction) {
         }
     }
 
-    rebuildSearchLayout();
+    rebuildSearchLayout(!bestCandidate->pinned && !currentIt->pinned && bestCandidate->workspaceIdx == currentIt->workspaceIdx);
     syncFocusedSelection();
     damage();
     return true;

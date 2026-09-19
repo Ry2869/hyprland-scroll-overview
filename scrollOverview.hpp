@@ -98,7 +98,8 @@ class CScrollOverview : public IOverview {
     bool       windowMatchesSearch(const PHLWINDOW& window) const;
     bool       shouldRenderOverviewWindow(const PHLWINDOW& window) const;
     bool       shouldRenderPinnedOverviewWindow(const PHLWINDOW& window) const;
-    void       rebuildSearchLayout();
+    void       rebuildSearchLayout(bool animateSelectionChange = false);
+    void       resetSearchLayoutAnimation();
     bool       usesCompactedSearchWorkspaceRows() const;
     bool       workspaceVisibleInOverview(size_t workspaceIdx) const;
     std::optional<size_t> workspaceDisplayRank(size_t workspaceIdx) const;
@@ -332,6 +333,7 @@ class CScrollOverview : public IOverview {
     PHLANIMVAR<Vector2D>             viewOffset;
     PHLANIMVAR<float>                workspaceInsertProgress;
     PHLANIMVAR<float>                workspaceInsertFadeProgress;
+    PHLANIMVAR<float>                searchLayoutProgress;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceInsertFadeConfig;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceRemoveFadeConfig;
     Time::steady_tp                  lastRealtimePreviewFrame = {};
@@ -343,6 +345,7 @@ class CScrollOverview : public IOverview {
     std::string                      searchRepeatText;
     std::unordered_set<uint32_t>     consumedSearchKeys;
     std::string                      normalizedSearchQuery;
+    std::unordered_map<Desktop::View::CWindow*, CBox> searchLayoutStartBoxes;
     std::unordered_map<Desktop::View::CWindow*, CBox> searchLayoutBoxes;
     std::vector<size_t>              searchVisibleWorkspaceIndices;
     std::string                      searchQueryCacheLabel;

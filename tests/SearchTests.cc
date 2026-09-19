@@ -102,6 +102,14 @@ int main() {
     CHECK(sameBox(boxFor(compacted, 1), {255, 240, 700, 600}));
     CHECK(sameBox(boxFor(compacted, 2), {965, 240, 700, 600}));
 
+    const auto firstSelected = ScrollOverview::SearchLayout::compact(twoAdjacentMatches, EAxis::HORIZONTAL, viewport, 1);
+    const auto secondSelected = ScrollOverview::SearchLayout::compact(twoAdjacentMatches, EAxis::HORIZONTAL, viewport, 2);
+    CHECK(sameBox(boxFor(firstSelected, 1), {510, 240, 700, 600}));
+    CHECK(sameBox(boxFor(firstSelected, 2), {1220, 240, 700, 600}));
+    CHECK(sameBox(boxFor(secondSelected, 1), {0, 240, 700, 600}));
+    CHECK(sameBox(boxFor(secondSelected, 2), {710, 240, 700, 600}));
+    CHECK(sameBox(ScrollOverview::SearchLayout::interpolate(boxFor(firstSelected, 1), boxFor(secondSelected, 1), 0.5), {255, 240, 700, 600}));
+
     const std::vector<SItem> hiddenBetween = {
         {.id = 1, .box = {0, 0, 700, 600}, .matches = true},
         {.id = 2, .box = {710, 0, 700, 600}, .matches = false},

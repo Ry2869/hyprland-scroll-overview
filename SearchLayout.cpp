@@ -98,7 +98,7 @@ SBox occupiedBounds(const std::vector<SResult>& results) {
     return {.x = left, .y = top, .width = right - left, .height = bottom - top};
 }
 
-double alignmentOffset(const SBox& occupied, const SBox& target, const SBox* selected, EAxis axis) {
+double alignmentOffset(const SBox& occupied, const SBox& target, const SBox* selected, EAxis axis, bool followSelection) {
     const double occupiedStart = axisStart(occupied, axis);
     const double occupiedSize  = axisSize(occupied, axis);
     const double targetStart   = axisStart(target, axis);
@@ -107,15 +107,17 @@ double alignmentOffset(const SBox& occupied, const SBox& target, const SBox* sel
     if (targetSize <= 0.0)
         return -occupiedStart;
 
-    if (occupiedSize <= targetSize)
+    if (occupiedSize <= targetSize && (!selected || !followSelection))
         return targetStart + (targetSize - occupiedSize) / 2.0 - occupiedStart;
 
     if (!selected)
         return targetStart - occupiedStart;
 
     const double desired = targetStart + targetSize / 2.0 - (axisStart(*selected, axis) + axisSize(*selected, axis) / 2.0);
-    const double minimum = targetStart + targetSize - (occupiedStart + occupiedSize);
-    const double maximum = targetStart - occupiedStart;
+    const double leading  = targetStart - occupiedStart;
+    const double trailing = targetStart + targetSize - (occupiedStart + occupiedSize);
+    const double minimum  = std::min(leading, trailing);
+    const double maximum  = std::max(leading, trailing);
     return std::clamp(desired, minimum, maximum);
 }
 
@@ -199,14 +201,25 @@ std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis,
     const auto BOUNDS      = occupiedBounds(results);
     const auto SELECTED    = selectedId ? std::ranges::find_if(results, [selectedId](const auto& result) { return result.id == *selectedId; }) : results.end();
     const auto SELECTEDBOX = SELECTED == results.end() ? nullptr : &SELECTED->box;
-    const auto XOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::HORIZONTAL);
-    const auto YOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::VERTICAL);
+    const auto XOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::HORIZONTAL, primaryAxis == EAxis::HORIZONTAL);
+    const auto YOFFSET     = alignmentOffset(BOUNDS, targetBox, SELECTEDBOX, EAxis::VERTICAL, primaryAxis == EAxis::VERTICAL);
     for (auto& result : results) {
         translateAxis(result.box, EAxis::HORIZONTAL, XOFFSET);
         translateAxis(result.box, EAxis::VERTICAL, YOFFSET);
     }
 
     return results;
+}
+
+SBox interpolate(const SBox& from, const SBox& to, double progress) {
+    const auto P    = std::clamp(progress, 0.0, 1.0);
+    const auto lerp = [P](double start, double end) { return start + (end - start) * P; };
+    return {
+        .x      = lerp(from.x, to.x),
+        .y      = lerp(from.y, to.y),
+        .width  = lerp(from.width, to.width),
+        .height = lerp(from.height, to.height),
+    };
 }
 
 std::vector<size_t> matchingRowIndices(const std::vector<bool>& rowMatches) {

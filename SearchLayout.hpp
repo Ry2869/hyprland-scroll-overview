@@ -35,6 +35,8 @@ struct SResult {
 std::vector<SResult> compact(const std::vector<SItem>& items, EAxis primaryAxis, const SBox& targetBox,
                              std::optional<size_t> selectedId = std::nullopt);
 
+SBox interpolate(const SBox& from, const SBox& to, double progress);
+
 std::vector<size_t> matchingRowIndices(const std::vector<bool>& rowMatches);
 std::optional<size_t> rowRank(const std::vector<size_t>& visibleRows, size_t workspaceIndex);
 
